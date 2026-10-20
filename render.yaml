@@ -15,7 +15,7 @@ services:
       - key: OPENROUTER_API_KEY
         sync: false
       - key: OPENROUTER_MODEL
-        value: google/gemini-2.0-flash-exp:free
+        value: minimax/minimax-m3.1-flash:free
       - key: USER_TIMEZONE
         value: Europe/Istanbul
       - key: GOOGLE_SERVICE_ACCOUNT_JSON

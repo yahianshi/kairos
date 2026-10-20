@@ -36,7 +36,7 @@ class Config:
 
     # OpenRouter
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "").strip()
-    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "google/gemini-2.0-flash-exp:free").strip()
+    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "minimax/minimax-m3.1-flash:free").strip()
 
     # Timezone
     USER_TIMEZONE_STR: str = os.getenv("USER_TIMEZONE", "UTC").strip()
