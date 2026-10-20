@@ -34,9 +34,12 @@ class Config:
             if uid.isdigit():
                 TELEGRAM_ALLOWED_USER_IDS.append(int(uid))
 
-    # OpenRouter
+    # OpenRouter Models (Primary -> Secondary -> Fallback, max 3 models)
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "").strip()
-    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "minimax/minimax-m3.1-flash:free").strip()
+    default_models_str = "nvidia/nemotron-3-super-120b-a12b:free,google/gemma-4-31b-it:free,openrouter/free"
+    raw_models = os.getenv("OPENROUTER_MODELS", "").strip() or os.getenv("OPENROUTER_MODEL", "").strip() or default_models_str
+    OPENROUTER_MODELS: list[str] = [m.strip() for m in raw_models.split(",") if m.strip()][:3]
+    OPENROUTER_MODEL: str = OPENROUTER_MODELS[0] if OPENROUTER_MODELS else "openrouter/free"
 
     # Timezone
     USER_TIMEZONE_STR: str = os.getenv("USER_TIMEZONE", "UTC").strip()

@@ -14,8 +14,8 @@ services:
         sync: false
       - key: OPENROUTER_API_KEY
         sync: false
-      - key: OPENROUTER_MODEL
-        value: minimax/minimax-m3.1-flash:free
+      - key: OPENROUTER_MODELS
+        value: nvidia/nemotron-3-super-120b-a12b:free,google/gemma-4-31b-it:free,openrouter/free
       - key: USER_TIMEZONE
         value: Europe/Istanbul
       - key: GOOGLE_SERVICE_ACCOUNT_JSON
