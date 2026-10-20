@@ -1,0 +1,10 @@
+python-telegram-bot[job-queue]>=21.0
+APScheduler>=3.10.4
+aiohttp>=3.9.5
+aiosqlite>=0.20.0
+google-api-python-client>=2.125.0
+google-auth>=2.29.0
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+python-dotenv>=1.0.1
+pytz>=2024.1
