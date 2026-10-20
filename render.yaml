@@ -1,10 +1,12 @@
 services:
-  - type: worker
+  - type: web
     name: kairos-scheduler
     env: python
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
     autoDeploy: true
+    healthCheckPath: /health
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
@@ -19,4 +21,10 @@ services:
       - key: GOOGLE_SERVICE_ACCOUNT_JSON
         sync: false
       - key: GOOGLE_CALENDAR_IDS
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REFRESH_TOKEN
         sync: false
