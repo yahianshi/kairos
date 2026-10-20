@@ -104,11 +104,30 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     upcoming = await db_instance.get_upcoming_events(chat_id, limit=6)
 
+    # Check live service state
+    if not google_service_instance.calendar_service:
+        google_service_instance._init_services()
+
+    cal_ok = "✅ Connected" if google_service_instance.calendar_service else "❌ Not Initialized (Missing GOOGLE_SERVICE_ACCOUNT_JSON)"
+    tasks_ok = "✅ Connected" if google_service_instance.tasks_service else "⚠️ Not Configured"
+
+    diag = (
+        "⚙️ *Kairos System Diagnostics:*\n"
+        f"• *Google Calendar:* {cal_ok}\n"
+        f"• *Google Tasks:* {tasks_ok}\n"
+        f"• *Timezone:* `{Config.USER_TIMEZONE_STR}`\n"
+        f"• *Configured Calendars:* `{len(Config.GOOGLE_CALENDAR_IDS)}`\n\n"
+    )
+
     if not upcoming:
-        await update.message.reply_text("📅 You have no upcoming bot-managed sessions currently scheduled.")
+        await update.message.reply_text(
+            f"{diag}📅 *Upcoming Blocks:* None currently scheduled.\n\n"
+            "Try: _\"Schedule 1 hour of self studying tomorrow at 10 AM\"_",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
 
-    lines = ["📅 *Your Upcoming Scheduled Blocks:*\n"]
+    lines = [f"{diag}📅 *Your Upcoming Scheduled Blocks:*\n"]
     for ev in upcoming:
         start_fmt = format_human_datetime(ev["start_iso"])
         end_fmt = format_human_datetime(ev["end_iso"]).split(" at ")[-1]

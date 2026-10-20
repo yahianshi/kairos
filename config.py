@@ -90,32 +90,81 @@ class Config:
     def get_service_account_info(cls) -> dict | None:
         """
         Retrieves service account dict from:
-        1. Base64 or raw JSON env var GOOGLE_SERVICE_ACCOUNT_JSON
+        1. GOOGLE_SERVICE_ACCOUNT_JSON (or common aliases: GOOGLE_SERVICE_ACCOUNT, SERVICE_ACCOUNT_JSON)
         2. Local file path GOOGLE_SERVICE_ACCOUNT_PATH
         """
-        if cls.GOOGLE_SERVICE_ACCOUNT_JSON_RAW:
-            raw = cls.GOOGLE_SERVICE_ACCOUNT_JSON_RAW
-            # Try raw JSON first
+        # Dynamic check in os.environ for cloud runtime
+        raw = (
+            os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+            or os.getenv("GOOGLE_SERVICE_ACCOUNT", "").strip()
+            or os.getenv("SERVICE_ACCOUNT_JSON", "").strip()
+            or cls.GOOGLE_SERVICE_ACCOUNT_JSON_RAW
+        )
+
+        if raw:
+            # Strip wrapping single or double quotes
+            if (raw.startswith("'") and raw.endswith("'")) or (raw.startswith('"') and raw.endswith('"')):
+                raw = raw[1:-1].strip()
+
+            # 1. Try direct JSON parse
             try:
-                return json.loads(raw)
+                data = json.loads(raw)
+                if isinstance(data, dict) and ("type" in data or "client_email" in data):
+                    if "private_key" in data and isinstance(data["private_key"], str):
+                        data["private_key"] = data["private_key"].replace("\\n", "\n")
+                    return data
+            except Exception as e_json:
+                logger.debug(f"Direct JSON parse of service account failed: {e_json}")
+
+            # 2. Try unescaping double-escaped strings
+            try:
+                unescaped = raw.encode().decode("unicode_escape")
+                data = json.loads(unescaped)
+                if isinstance(data, dict) and ("type" in data or "client_email" in data):
+                    if "private_key" in data and isinstance(data["private_key"], str):
+                        data["private_key"] = data["private_key"].replace("\\n", "\n")
+                    return data
             except Exception:
                 pass
-            # Try Base64 decode
-            try:
-                decoded = base64.b64decode(raw).decode("utf-8")
-                return json.loads(decoded)
-            except Exception as e:
-                logger.error(f"Failed to decode GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
-                return None
 
-        if os.path.exists(cls.GOOGLE_SERVICE_ACCOUNT_PATH):
+            # 3. Try Base64 decode
             try:
-                with open(cls.GOOGLE_SERVICE_ACCOUNT_PATH, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"Failed to read service account JSON at {cls.GOOGLE_SERVICE_ACCOUNT_PATH}: {e}")
-                return None
+                padded = raw + "=" * (-len(raw) % 4)
+                decoded = base64.b64decode(padded).decode("utf-8")
+                data = json.loads(decoded)
+                if isinstance(data, dict) and ("type" in data or "client_email" in data):
+                    if "private_key" in data and isinstance(data["private_key"], str):
+                        data["private_key"] = data["private_key"].replace("\\n", "\n")
+                    return data
+            except Exception as e_b64:
+                logger.debug(f"Base64 parse of service account failed: {e_b64}")
 
+            logger.error("GOOGLE_SERVICE_ACCOUNT_JSON is set but could not be parsed as valid Service Account JSON or Base64.")
+
+        # Check file path fallback (for local development)
+        paths_to_check = [
+            os.getenv("GOOGLE_SERVICE_ACCOUNT_PATH", "").strip(),
+            cls.GOOGLE_SERVICE_ACCOUNT_PATH,
+            "service_account.json",
+            "secrets/calendar-bot-512217-7d6917888104-cal-api.json"
+        ]
+
+        for p in paths_to_check:
+            if p and os.path.exists(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if isinstance(data, dict) and ("type" in data or "client_email" in data):
+                            if "private_key" in data and isinstance(data["private_key"], str):
+                                data["private_key"] = data["private_key"].replace("\\n", "\n")
+                            return data
+                except Exception as e:
+                    logger.error(f"Failed to read service account JSON at {p}: {e}")
+
+        logger.warning(
+            "Service account credentials not found. In cloud environments (Render/Railway), "
+            "ensure 'GOOGLE_SERVICE_ACCOUNT_JSON' environment variable contains the JSON text."
+        )
         return None
 
     @classmethod
@@ -131,12 +180,12 @@ class Config:
         
         sa_info = cls.get_service_account_info()
         if not sa_info:
-            errors.append("Google Service Account credentials not found (provide GOOGLE_SERVICE_ACCOUNT_JSON or valid GOOGLE_SERVICE_ACCOUNT_PATH).")
+            errors.append("Google Service Account credentials not found (set GOOGLE_SERVICE_ACCOUNT_JSON in Render).")
 
         if not cls.GOOGLE_CALENDAR_IDS:
             errors.append("GOOGLE_CALENDAR_IDS is empty. Provide a valid JSON map of calendar names to IDs.")
         else:
-            missing_cals = [name for name in EXPECTED_CALENDARS if name not in cls.GOOGLE_CALENDAR_IDS]
+            missing_cals = [name for name in EXPECTED_CALENDARS if not cls.get_calendar_id(name)]
             if missing_cals:
                 errors.append(f"GOOGLE_CALENDAR_IDS is missing expected calendars: {missing_cals}")
 

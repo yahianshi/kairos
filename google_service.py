@@ -64,7 +64,12 @@ class GoogleService:
         Returns (is_free, list_of_busy_intervals)
         """
         if not self.calendar_service:
-            raise RuntimeError("Google Calendar service is not initialized.")
+            self._init_services()
+        if not self.calendar_service:
+            raise RuntimeError(
+                "Google Calendar service is not initialized. "
+                "Please verify that 'GOOGLE_SERVICE_ACCOUNT_JSON' is added in your Render dashboard under Environment."
+            )
 
         body = {
             "timeMin": start_iso,
@@ -188,7 +193,12 @@ class GoogleService:
         Attaches bot metadata in extendedProperties.
         """
         if not self.calendar_service:
-            raise RuntimeError("Calendar service not initialized.")
+            self._init_services()
+        if not self.calendar_service:
+            raise RuntimeError(
+                "Calendar service not initialized. "
+                "Please verify that 'GOOGLE_SERVICE_ACCOUNT_JSON' is added in your Render dashboard under Environment."
+            )
 
         # Ensure title has ⏳ prefix
         clean_title = title.strip()
