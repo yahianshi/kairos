@@ -3,7 +3,9 @@ import asyncio
 import logging
 import sys
 from aiohttp import web
-from telegram.ext import ApplicationBuilder, Application
+from telegram import Update
+from telegram.error import Conflict, NetworkError
+from telegram.ext import ApplicationBuilder, Application, ContextTypes
 
 from config import Config
 from database import db_instance
@@ -72,6 +74,21 @@ async def post_shutdown(application: Application):
 
     logger.info("Application shutdown complete.")
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Global error handler — suppresses 409 Conflict during rolling deploys."""
+    err = context.error
+    if isinstance(err, Conflict):
+        logger.warning(
+            "409 Conflict: another bot instance is polling. "
+            "This is normal during Render rolling deploys and will resolve in ~30s."
+        )
+        return
+    if isinstance(err, NetworkError):
+        logger.warning(f"Network error (will auto-retry): {err}")
+        return
+    logger.error(f"Unhandled exception: {err}", exc_info=err)
+
+
 def main():
     logger.info("Starting Kairos — AI Auto-Scheduler Telegram Bot...")
 
@@ -97,9 +114,10 @@ def main():
 
     # Register all handlers
     register_handlers(app)
+    app.add_error_handler(error_handler)
 
     logger.info("Bot is starting polling. Ready to receive commands...")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
