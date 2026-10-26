@@ -46,6 +46,33 @@ async def start_health_server():
     logger.info(f"Health check HTTP server listening on port {port}")
     return runner
 
+async def keep_alive_ping_loop():
+    """
+    Periodic self-ping loop to prevent Render Free tier from spinning down.
+    Render automatically populates RENDER_EXTERNAL_URL (e.g. https://kairos.onrender.com).
+    """
+    external_url = os.getenv("RENDER_EXTERNAL_URL")
+    if not external_url:
+        logger.info("RENDER_EXTERNAL_URL not set; skipping automated self-ping loop.")
+        return
+
+    health_url = f"{external_url.rstrip('/')}/health"
+    logger.info(f"Keep-alive self-ping loop active for {health_url}")
+
+    # Wait 3 minutes after launch before starting recurring pings
+    await asyncio.sleep(180)
+
+    import aiohttp
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(health_url, timeout=aiohttp.ClientTimeout(total=25)) as resp:
+                    logger.info(f"Keep-alive ping to {health_url} status: {resp.status}")
+        except Exception as e:
+            logger.warning(f"Keep-alive self-ping error: {e}")
+        # Ping every 8 minutes (Render sleeps after 15 minutes of inactivity)
+        await asyncio.sleep(480)
+
 async def post_init(application: Application):
     """Initializes async components after the bot application is built."""
     logger.info("Initializing database...")
@@ -59,6 +86,10 @@ async def post_init(application: Application):
     web_runner = await start_health_server()
     application.bot_data["web_runner"] = web_runner
 
+    # Start automated self-ping keep-alive
+    ping_task = asyncio.create_task(keep_alive_ping_loop())
+    application.bot_data["ping_task"] = ping_task
+
     bot_info = await application.bot.get_me()
     logger.info(f"Bot authorized as @{bot_info.username} (ID: {bot_info.id})")
 
@@ -66,6 +97,10 @@ async def post_shutdown(application: Application):
     """Graceful cleanup on shutdown."""
     logger.info("Shutting down accountability scheduler...")
     scheduler_instance.stop()
+
+    ping_task = application.bot_data.get("ping_task")
+    if ping_task:
+        ping_task.cancel()
 
     web_runner = application.bot_data.get("web_runner")
     if web_runner:
