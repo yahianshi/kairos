@@ -98,6 +98,45 @@ class GoogleService:
             logger.error(f"Error querying freebusy: {e}", exc_info=True)
             raise
 
+    def get_events_in_range(self, calendar_ids: list[str], start_iso: str, end_iso: str) -> list[dict]:
+        """
+        Retrieves actual events that overlap [start_iso, end_iso] from the given calendar IDs.
+        """
+        if not self.calendar_service:
+            self._init_services()
+        if not self.calendar_service:
+            return []
+
+        overlapping_events = []
+        for cid in calendar_ids:
+            try:
+                events_result = self.calendar_service.events().list(
+                    calendarId=cid,
+                    timeMin=start_iso,
+                    timeMax=end_iso,
+                    singleEvents=True,
+                    orderBy="startTime"
+                ).execute()
+                items = events_result.get("items", [])
+                for item in items:
+                    # Ignore cancelled events or transparency free
+                    if item.get("status") == "cancelled":
+                        continue
+                    item_start = item.get("start", {}).get("dateTime") or item.get("start", {}).get("date")
+                    item_end = item.get("end", {}).get("dateTime") or item.get("end", {}).get("date")
+                    overlapping_events.append({
+                        "event_id": item.get("id"),
+                        "calendar_id": cid,
+                        "title": item.get("summary", "Untitled Session"),
+                        "start_iso": item_start,
+                        "end_iso": item_end,
+                        "extendedProperties": item.get("extendedProperties", {})
+                    })
+            except Exception as e:
+                logger.warning(f"Error fetching events for calendar {cid}: {e}")
+
+        return overlapping_events
+
     def find_next_free_slot(
         self,
         duration_minutes: int,

@@ -176,5 +176,22 @@ class Database:
                 rows = await cursor.fetchall()
                 return [dict(r) for r in rows]
 
+    async def get_overlapping_events(self, chat_id: int, start_iso: str, end_iso: str) -> list[dict]:
+        """
+        Finds active tracked events that overlap with [start_iso, end_iso].
+        Overlap condition: start_iso < event.end_iso AND end_iso > event.start_iso.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT * FROM tracked_events
+                WHERE chat_id = ?
+                  AND status NOT IN ('completed', 'deleted')
+                  AND start_iso < ? AND end_iso > ?
+                ORDER BY start_iso ASC
+            """, (chat_id, end_iso, start_iso)) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(r) for r in rows]
+
 # Global DB instance
 db_instance = Database()

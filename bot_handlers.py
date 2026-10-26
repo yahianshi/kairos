@@ -302,7 +302,7 @@ async def schedule_and_reply(
         )
         return
 
-    # Handle conflict — propose next free slot with buttons
+    # Handle conflict — propose next free slot with buttons (and trim option if overlapping)
     if not is_free:
         dt_start = datetime.fromisoformat(start_iso)
         dt_end = datetime.fromisoformat(end_iso)
@@ -314,12 +314,55 @@ async def schedule_and_reply(
             start_search_dt=dt_start
         )
 
+        # Detect overlapping event to offer trimming / override
+        overlapping = await db_instance.get_overlapping_events(chat_id, start_iso, end_iso)
+        if not overlapping:
+            overlapping = google_service_instance.get_events_in_range(active_cal_ids, start_iso, end_iso)
+
+        trim_info = None
+        if overlapping:
+            conf_ev = overlapping[0]
+            clean_conf_title = conf_ev.get("title", "Existing Event").replace("⏳ ", "").replace("⏳", "").replace("✅", "").strip()
+            try:
+                conf_start_dt = datetime.fromisoformat(conf_ev["start_iso"])
+                conf_end_dt = datetime.fromisoformat(conf_ev["end_iso"])
+
+                if conf_start_dt < dt_start:
+                    trimmed_start_iso = conf_ev["start_iso"]
+                    trimmed_end_iso = start_iso
+                    cut_mins = max(1, int((conf_end_dt - dt_start).total_seconds() / 60))
+                    new_desc = f"end at {format_human_datetime(start_iso).split(' at ')[-1]}"
+                else:
+                    trimmed_start_iso = end_iso
+                    trimmed_end_iso = conf_ev["end_iso"] if conf_end_dt > dt_end else (dt_end + timedelta(minutes=30)).isoformat()
+                    cut_mins = max(1, int((min(conf_end_dt, dt_end) - conf_start_dt).total_seconds() / 60))
+                    new_desc = f"start at {format_human_datetime(end_iso).split(' at ')[-1]}"
+
+                trim_info = {
+                    "conflicting_event": conf_ev,
+                    "clean_title": clean_conf_title,
+                    "trimmed_start_iso": trimmed_start_iso,
+                    "trimmed_end_iso": trimmed_end_iso,
+                    "cut_mins": cut_mins,
+                    "new_boundary_desc": new_desc,
+                    "new_event": {
+                        "title": title,
+                        "start_iso": start_iso,
+                        "end_iso": end_iso,
+                        "target_calendar_name": target_calendar_name,
+                        "recurrence": recurrence
+                    }
+                }
+            except Exception as ex:
+                logger.warning(f"Could not calculate trim_info: {ex}")
+
         proposal_payload = {
             "title": title,
             "start_iso": next_start_iso,
             "end_iso": next_end_iso,
             "target_calendar_name": target_calendar_name,
-            "recurrence": recurrence
+            "recurrence": recurrence,
+            "trim_info": trim_info
         }
         await db_instance.set_pending_dialog(user_id, "propose_slot", proposal_payload)
 
@@ -330,14 +373,24 @@ async def schedule_and_reply(
 
         keyboard = [
             [InlineKeyboardButton("📅 Book This Slot", callback_data="accept_proposal")],
-            [InlineKeyboardButton("❌ Dismiss", callback_data="cancel_proposal")]
         ]
+        if trim_info:
+            short_conf = trim_info["clean_title"][:18]
+            keyboard.append([
+                InlineKeyboardButton(f"✂️ Trim '{short_conf}' & Book", callback_data="ask_trim_override")
+            ])
+        keyboard.append([InlineKeyboardButton("❌ Dismiss", callback_data="cancel_proposal")])
+
         conflict_msg = (
             f"⚠️ *Conflict Detected!*\n\n"
-            f"Busy: `{start_fmt} – {end_fmt}`\n\n"
-            f"💡 *Next Available:*\n"
+            f"Busy: `{start_fmt} – {end_fmt}`"
+        )
+        if trim_info:
+            conflict_msg += f"\nOverlap: *{trim_info['clean_title']}*"
+        conflict_msg += (
+            f"\n\n💡 *Next Available:*\n"
             f"🕒 *{next_start_fmt} – {next_end_fmt}*\n\n"
-            f"Schedule `{title}` here instead?"
+            f"Schedule `{title}` here instead, or trim the existing session?"
         )
         await context.bot.send_message(
             chat_id=chat_id,
@@ -984,6 +1037,237 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("❌ Scheduling cancelled.", reply_markup=main_menu_keyboard())
         return
 
+    # ── Trim & Override Prompt ────────────────────────────────────────
+    if data == "ask_trim_override":
+        pending = await db_instance.get_pending_dialog(user.id)
+        if not pending or pending.get("action") != "propose_slot":
+            await query.edit_message_text("⚠️ Request expired. Please try scheduling again.")
+            return
+
+        payload = pending.get("payload", {})
+        trim_info = payload.get("trim_info")
+        if not trim_info:
+            await query.edit_message_text("⚠️ No conflicting event details found.")
+            return
+
+        new_ev = trim_info["new_event"]
+        clean_conf = trim_info["clean_title"]
+        cut_mins = trim_info["cut_mins"]
+        new_desc = trim_info["new_boundary_desc"]
+
+        start_fmt = format_human_datetime(new_ev["start_iso"])
+        end_fmt = format_human_datetime(new_ev["end_iso"]).split(" at ")[-1]
+
+        confirm_msg = (
+            f"⚠️ *Confirm Trim & Schedule:*\n\n"
+            f"📌 *Book:* `{new_ev['title']}`\n"
+            f"🕒 *Time:* {start_fmt} – {end_fmt}\n\n"
+            f"✂️ *{clean_conf}* will be *cut back by {cut_mins} min* and will *{new_desc}*.\n\n"
+            f"Do you want to proceed?"
+        )
+        keyboard = [
+            [InlineKeyboardButton("✂️ Yes, Cut & Book", callback_data="confirm_trim_override")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel_proposal")]
+        ]
+        await query.edit_message_text(
+            confirm_msg,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    # ── Confirm Trim & Override ───────────────────────────────────────
+    if data == "confirm_trim_override":
+        pending = await db_instance.get_pending_dialog(user.id)
+        if not pending or pending.get("action") != "propose_slot":
+            await query.edit_message_text("⚠️ Request expired.")
+            return
+
+        payload = pending.get("payload", {})
+        trim_info = payload.get("trim_info")
+        if not trim_info:
+            await query.edit_message_text("⚠️ No trim information found.")
+            return
+
+        await db_instance.clear_pending_dialog(user.id)
+
+        conf_ev = trim_info["conflicting_event"]
+        conf_event_id = conf_ev.get("event_id")
+        conf_cal_id = conf_ev.get("calendar_id") or Config.get_calendar_id(conf_ev.get("calendar_name", "uncertain"))
+        new_ev = trim_info["new_event"]
+        clean_conf = trim_info["clean_title"]
+        cut_mins = trim_info["cut_mins"]
+        new_desc = trim_info["new_boundary_desc"]
+
+        # Step 1: Trim conflicting event
+        try:
+            if conf_cal_id and conf_event_id:
+                google_service_instance.patch_calendar_event_times(
+                    calendar_id=conf_cal_id,
+                    event_id=conf_event_id,
+                    start_iso=trim_info["trimmed_start_iso"],
+                    end_iso=trim_info["trimmed_end_iso"]
+                )
+                if conf_ev.get("task_id"):
+                    task_due = (datetime.fromisoformat(trim_info["trimmed_end_iso"]) + timedelta(minutes=5)).isoformat()
+                    google_service_instance.update_google_task_due(conf_ev["task_id"], task_due)
+
+                await db_instance.update_event_times(
+                    event_id=conf_event_id,
+                    start_iso=trim_info["trimmed_start_iso"],
+                    end_iso=trim_info["trimmed_end_iso"],
+                    status="active"
+                )
+        except Exception as e:
+            logger.error(f"Failed to trim event {conf_event_id}: {e}", exc_info=True)
+
+        # Step 2: Book new event
+        try:
+            new_cal_id = Config.get_calendar_id(new_ev["target_calendar_name"])
+            clean_new_title = new_ev["title"].replace("⏳", "").replace("✅", "").strip()
+
+            cal_event = google_service_instance.create_calendar_event(
+                calendar_id=new_cal_id,
+                title=clean_new_title,
+                start_iso=new_ev["start_iso"],
+                end_iso=new_ev["end_iso"],
+                metadata={"calendar_name": new_ev["target_calendar_name"], "chat_id": str(chat_id)},
+                recurrence=new_ev.get("recurrence")
+            )
+            new_event_id = cal_event.get("id")
+
+            dt_end = datetime.fromisoformat(new_ev["end_iso"])
+            task_due = dt_end + timedelta(minutes=5)
+            task_id = google_service_instance.create_google_task(
+                title=clean_new_title,
+                due_iso=task_due.isoformat(),
+                notes=f"Linked calendar block in '{new_ev['target_calendar_name']}'"
+            )
+
+            await db_instance.add_tracked_event(
+                event_id=new_event_id,
+                calendar_id=new_cal_id,
+                calendar_name=new_ev["target_calendar_name"],
+                task_id=task_id,
+                title=cal_event.get("summary"),
+                start_iso=new_ev["start_iso"],
+                end_iso=new_ev["end_iso"],
+                chat_id=chat_id,
+                status="active"
+            )
+
+            new_start_fmt = format_human_datetime(new_ev["start_iso"])
+            new_end_fmt = format_human_datetime(new_ev["end_iso"]).split(" at ")[-1]
+
+            success_msg = (
+                f"✨ *{cal_event.get('summary')}* has been scheduled!\n"
+                f"🕒 {new_start_fmt} – {new_end_fmt}\n\n"
+                f"✂️ *{clean_conf}* was cut back by *{cut_mins} min* (now will {new_desc}).\n\n"
+                f"Would you like to reschedule *{clean_conf}*?"
+            )
+
+            followup_keyboard = [
+                [
+                    InlineKeyboardButton("🔄 Reschedule Entire Session", callback_data=f"trim_resched_all:{conf_event_id}"),
+                ],
+                [
+                    InlineKeyboardButton(f"⏱️ Reschedule Remaining ({cut_mins}m)", callback_data=f"trim_resched_rem:{conf_event_id}:{cut_mins}"),
+                ],
+                [
+                    InlineKeyboardButton("✅ Keep As Is", callback_data="trim_keep_as_is")
+                ]
+            ]
+
+            await query.edit_message_text(
+                success_msg,
+                reply_markup=InlineKeyboardMarkup(followup_keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to book event in trim_override: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Failed to book event: {e}")
+        return
+
+    # ── Reschedule Remaining Cut Minutes ──────────────────────────────
+    if data.startswith("trim_resched_rem:"):
+        parts = data.split(":")
+        conf_event_id = parts[1]
+        cut_mins = int(parts[2])
+
+        event = await db_instance.get_tracked_event(conf_event_id)
+        raw_title = event["title"] if event else "Session Remainder"
+        clean_title = raw_title.replace("⏳ ", "").replace("⏳", "").replace("✅", "").strip()
+        rem_title = f"{clean_title} (Part 2)"
+        target_cal_name = event["calendar_name"] if event else "Self Studying"
+        target_cal_id = Config.get_calendar_id(target_cal_name)
+
+        active_cal_ids = [
+            cid for name, cid in Config.GOOGLE_CALENDAR_IDS.items()
+            if name != "Completed Tasks" and cid
+        ]
+
+        try:
+            next_start_iso, next_end_iso = google_service_instance.find_next_free_slot(
+                duration_minutes=cut_mins,
+                calendar_ids=active_cal_ids
+            )
+
+            cal_event = google_service_instance.create_calendar_event(
+                calendar_id=target_cal_id,
+                title=rem_title,
+                start_iso=next_start_iso,
+                end_iso=next_end_iso,
+                metadata={"calendar_name": target_cal_name, "chat_id": str(chat_id)}
+            )
+            new_event_id = cal_event.get("id")
+
+            dt_end = datetime.fromisoformat(next_end_iso)
+            task_due = dt_end + timedelta(minutes=5)
+            task_id = google_service_instance.create_google_task(
+                title=rem_title,
+                due_iso=task_due.isoformat(),
+                notes=f"Remainder of '{clean_title}'"
+            )
+
+            await db_instance.add_tracked_event(
+                event_id=new_event_id,
+                calendar_id=target_cal_id,
+                calendar_name=target_cal_name,
+                task_id=task_id,
+                title=cal_event.get("summary"),
+                start_iso=next_start_iso,
+                end_iso=next_end_iso,
+                chat_id=chat_id,
+                status="active"
+            )
+
+            rem_start_fmt = format_human_datetime(next_start_iso)
+            rem_end_fmt = format_human_datetime(next_end_iso).split(" at ")[-1]
+
+            await query.edit_message_text(
+                f"⏱️ *Remaining Session Booked!*\n\n"
+                f"📌 `{cal_event.get('summary')}`\n"
+                f"📁 {target_cal_name}\n"
+                f"🕒 {rem_start_fmt} – {rem_end_fmt} ({cut_mins}m)\n"
+                f"📋 Linked Google Task created.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=main_menu_keyboard()
+            )
+        except Exception as e:
+            logger.error(f"Failed to book remaining session: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Failed to book remaining session: {e}")
+        return
+
+    # ── Keep Trimmed As Is ────────────────────────────────────────────
+    if data == "trim_keep_as_is":
+        await query.edit_message_text(
+            "✅ *All set!* The session remains trimmed and your new schedule is locked in.",
+            reply_markup=main_menu_keyboard(),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
     # ── Per-event: Mark Done ──────────────────────────────────────────
     if data.startswith("ev_done:") or data.startswith("status_done:"):
         event_id = data.split(":", 1)[-1]
@@ -1077,7 +1361,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     # ── Per-event: Reschedule menu ────────────────────────────────────
-    if data.startswith("ev_resched_menu:") or data.startswith("status_resched:"):
+    if data.startswith("ev_resched_menu:") or data.startswith("status_resched:") or data.startswith("trim_resched_all:"):
         event_id = data.split(":", 1)[-1]
         event = await db_instance.get_tracked_event(event_id)
         if not event:
