@@ -89,8 +89,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "   • *Done*: Moves the event to `Completed Tasks`, changes ⏳ to ✅, and checks off the Google Task.\n"
         "   • *Working on it*: Extends the calendar block and shifts the task due time.\n"
         "   • *Reschedule*: Finds the next open slot on your schedule.\n\n"
-        "3. *Commands:*\n"
+        "3. *Delete Events:*\n"
+        "   Say _\"delete my algorithms study session\"_ or use /delete to pick from a list.\n\n"
+        "4. *Recurring Events:*\n"
+        "   Say _\"schedule daily morning run at 7 AM for 30 minutes\"_ or\n"
+        "   _\"every weekday 1 hour of self study at 9 PM\"_.\n\n"
+        "5. *Reschedule:*\n"
+        "   Say _\"reschedule my algorithms session to tomorrow at 3 PM\"_\n"
+        "   (bot moves the existing event — no duplicate created).\n\n"
+        "6. *Commands:*\n"
         "   /status - View upcoming tracked sessions\n"
+        "   /delete - Delete a scheduled event (with confirmation)\n"
         "   /cancel - Cancel any active pending action\n"
         "   /help - Show this message"
     )
@@ -150,6 +159,42 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("No active action to cancel.")
 
+
+async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists upcoming tracked events with a Delete button next to each one."""
+    user = update.effective_user
+    if not is_authorized(user.id):
+        return
+
+    chat_id = update.effective_chat.id
+    upcoming = await db_instance.get_upcoming_events(chat_id, limit=10)
+
+    if not upcoming:
+        await update.message.reply_text(
+            "📅 No active scheduled events found to delete."
+        )
+        return
+
+    lines = ["🗑️ *Select an event to delete:*\n"]
+    keyboard = []
+    for ev in upcoming:
+        start_fmt = format_human_datetime(ev["start_iso"])
+        short_title = ev["title"].replace("⏳ ", "").replace("⏳", "").strip()
+        lines.append(f"• `{short_title}` — {start_fmt}")
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🗑️ {short_title[:30]}",
+                callback_data=f"delete_ask:{ev['event_id']}"
+            )
+        ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
 # =====================================================================
 # CORE SCHEDULING HELPER
 # =====================================================================
@@ -161,7 +206,8 @@ async def schedule_and_reply(
     start_iso: str,
     end_iso: str,
     target_calendar_name: str,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
+    recurrence: str | None = None
 ):
     """
     Performs availability checking via freebusy across all active calendars,
@@ -212,7 +258,8 @@ async def schedule_and_reply(
             "title": title,
             "start_iso": next_start_iso,
             "end_iso": next_end_iso,
-            "target_calendar_name": target_calendar_name
+            "target_calendar_name": target_calendar_name,
+            "recurrence": recurrence
         }
         await db_instance.set_pending_dialog(user_id, "propose_slot", proposal_payload)
 
@@ -251,7 +298,8 @@ async def schedule_and_reply(
             title=clean_title,
             start_iso=start_iso,
             end_iso=end_iso,
-            metadata={"calendar_name": target_calendar_name, "chat_id": str(chat_id)}
+            metadata={"calendar_name": target_calendar_name, "chat_id": str(chat_id)},
+            recurrence=recurrence
         )
         event_id = cal_event.get("id")
 
@@ -282,11 +330,13 @@ async def schedule_and_reply(
         end_fmt = format_human_datetime(end_iso).split(" at ")[-1]
         task_status_text = "✅ Created (Due 5m post-session)" if task_id else "⚠️ Skipped (Check Tasks credentials)"
 
+        recurrence_label = f"\n🔁 *Repeats:* `{recurrence}`" if recurrence else ""
         success_text = (
             f"✨ *Session Successfully Scheduled!*\n\n"
             f"📌 *Event:* `{cal_event.get('summary')}`\n"
             f"📁 *Calendar:* `{target_calendar_name}`\n"
-            f"🕒 *Time:* {start_fmt} – {end_fmt}\n"
+            f"🕒 *Time:* {start_fmt} – {end_fmt}"
+            f"{recurrence_label}\n"
             f"📋 *Google Task:* {task_status_text}\n\n"
             f"🔔 _I will automatically ping you when this block ends!_"
         )
@@ -344,12 +394,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Call LLM via OpenRouter
     llm_result = await llm_service_instance.parse_user_request(user_text)
 
-    if llm_result.get("is_tool_call") and llm_result.get("tool_name") == "schedule_session":
-        args = llm_result.get("arguments", {})
+    tool_name = llm_result.get("tool_name") if llm_result.get("is_tool_call") else None
+    args = llm_result.get("arguments", {}) or {}
+
+    # ── schedule_session ──────────────────────────────────────────────
+    if tool_name == "schedule_session":
         title = args.get("title", "Study Session")
         start_iso = args.get("start_iso")
         end_iso = args.get("end_iso")
         target_cal = args.get("target_calendar_name")
+        recurrence = args.get("recurrence")  # may be None for one-off
 
         if not start_iso or not end_iso:
             await update.message.reply_text(
@@ -362,7 +416,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pending_payload = {
                 "title": title,
                 "start_iso": start_iso,
-                "end_iso": end_iso
+                "end_iso": end_iso,
+                "recurrence": recurrence
             }
             await db_instance.set_pending_dialog(user.id, "select_calendar", pending_payload)
 
@@ -379,21 +434,108 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup = InlineKeyboardMarkup(keyboard)
             start_fmt = format_human_datetime(start_iso)
             end_fmt = format_human_datetime(end_iso).split(" at ")[-1]
+            recurrence_hint = f"\n🔁 Recurring: `{recurrence}`" if recurrence else ""
 
             msg = (
                 f"🤔 *Which calendar should this be scheduled in?*\n\n"
                 f"📌 *Activity:* `{title}`\n"
-                f"🕒 *Time:* {start_fmt} – {end_fmt}\n\n"
+                f"🕒 *Time:* {start_fmt} – {end_fmt}"
+                f"{recurrence_hint}\n\n"
                 f"Please choose below:"
             )
             await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
             return
 
         # Category is known: execute schedule
-        await schedule_and_reply(chat_id, user.id, title, start_iso, end_iso, target_cal, context)
+        await schedule_and_reply(chat_id, user.id, title, start_iso, end_iso, target_cal, context,
+                                 recurrence=recurrence)
 
+    # ── delete_session ────────────────────────────────────────────────
+    elif tool_name == "delete_session":
+        search_title = args.get("search_title", "").strip().lower()
+        upcoming = await db_instance.get_upcoming_events(chat_id, limit=20)
+        matches = [
+            ev for ev in upcoming
+            if search_title in ev["title"].lower()
+            or search_title in ev["title"].replace("⏳ ", "").lower()
+        ]
+
+        if not matches:
+            await update.message.reply_text(
+                "\u274c No active scheduled event found matching "
+                f"*\"{args.get('search_title')}\"*.\n\n"
+                "Use /delete to see all your upcoming events.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+        if len(matches) == 1:
+            ev = matches[0]
+            short_title = ev["title"].replace("⏳ ", "").replace("⏳", "").strip()
+            start_fmt = format_human_datetime(ev["start_iso"])
+            keyboard = [[
+                InlineKeyboardButton("🗑️ Yes, Delete It", callback_data=f"delete_confirm:{ev['event_id']}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="delete_cancel")
+            ]]
+            await update.message.reply_text(
+                f"⚠️ *Confirm Deletion*\n\n"
+                f"📌 *{short_title}*\n"
+                f"🕒 {start_fmt}\n\n"
+                f"This will permanently remove the event from Google Calendar.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            # Multiple matches — let user pick
+            keyboard = []
+            for ev in matches[:5]:
+                short_title = ev["title"].replace("⏳ ", "").replace("⏳", "").strip()
+                start_fmt = format_human_datetime(ev["start_iso"])
+                keyboard.append([InlineKeyboardButton(
+                    f"🗑️ {short_title[:25]} — {start_fmt}",
+                    callback_data=f"delete_ask:{ev['event_id']}"
+                )])
+            keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="delete_cancel")])
+            await update.message.reply_text(
+                f"🔍 Found {len(matches)} events matching *\"{args.get('search_title')}\"*. Which one?",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+    # ── reschedule_session ────────────────────────────────────────────
+    elif tool_name == "reschedule_session":
+        search_title = args.get("search_title", "").strip().lower()
+        new_start_iso = args.get("new_start_iso")
+        new_end_iso = args.get("new_end_iso")
+
+        if not new_start_iso or not new_end_iso:
+            await update.message.reply_text(
+                "🤔 I couldn't determine the new time. Please specify the new date and time."
+            )
+            return
+
+        upcoming = await db_instance.get_upcoming_events(chat_id, limit=20)
+        matches = [
+            ev for ev in upcoming
+            if search_title in ev["title"].lower()
+            or search_title in ev["title"].replace("⏳ ", "").lower()
+        ]
+
+        if not matches:
+            search_query = args.get('search_title', '')
+            await update.message.reply_text(
+                f"❌ No active event found matching *\"{search_query}\"*.\n\n"
+                "Use /status to view your upcoming events.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+        ev = matches[0]  # Take closest match
+        await update.message.reply_text("🔄 Rescheduling...")
+        await execute_reschedule_to(chat_id, ev["event_id"], new_start_iso, new_end_iso, context)
+
+    # ── conversational fallback ───────────────────────────────────────
     else:
-        # Conversational text response
         reply = llm_result.get("reply_text") or "I received your message."
         await update.message.reply_text(reply)
 
@@ -445,6 +587,52 @@ async def execute_extension(chat_id: int, event_id: str, minutes: int, context: 
     except Exception as e:
         logger.error(f"Failed to extend event: {e}", exc_info=True)
         await context.bot.send_message(chat_id=chat_id, text=f"❌ Failed to extend event: {e}")
+
+async def execute_reschedule_to(
+    chat_id: int,
+    event_id: str,
+    new_start_iso: str,
+    new_end_iso: str,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    """Reschedules an existing event to an explicit new start/end time."""
+    event = await db_instance.get_tracked_event(event_id)
+    if not event:
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ Event not found in local database.")
+        return
+
+    try:
+        google_service_instance.reschedule_calendar_event(
+            calendar_id=event["calendar_id"],
+            event_id=event_id,
+            new_start_iso=new_start_iso,
+            new_end_iso=new_end_iso
+        )
+
+        task_id = event.get("task_id")
+        if task_id:
+            new_task_due = (datetime.fromisoformat(new_end_iso) + timedelta(minutes=5)).isoformat()
+            google_service_instance.update_google_task_due(task_id, new_task_due)
+
+        await db_instance.update_event_times(event_id, new_start_iso, new_end_iso, status="active")
+
+        new_start_fmt = format_human_datetime(new_start_iso)
+        new_end_fmt = format_human_datetime(new_end_iso).split(" at ")[-1]
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"🔄 *Rescheduled!*\n\n"
+                f"📌 *Block:* `{event['title']}`\n"
+                f"🕒 *New Time:* {new_start_fmt} – {new_end_fmt}\n"
+                f"📋 Google Task due date updated."
+            ),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Failed to reschedule event to specific time: {e}", exc_info=True)
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ Failed to reschedule: {e}")
+
 
 async def execute_reschedule(chat_id: int, event_id: str, context: ContextTypes.DEFAULT_TYPE):
     """Finds next available gap and reschedules event and task."""
@@ -536,7 +724,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await db_instance.clear_pending_dialog(user.id)
         await query.edit_message_text(f"Selected calendar: *{selected_cal}*. Checking availability...", parse_mode=ParseMode.MARKDOWN)
 
-        await schedule_and_reply(chat_id, user.id, title, start_iso, end_iso, selected_cal, context)
+        await schedule_and_reply(chat_id, user.id, title, start_iso, end_iso, selected_cal, context,
+                               recurrence=payload.get("recurrence"))
         return
 
     # Accept Proposed Slot callback
@@ -557,13 +746,71 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             start_iso=payload["start_iso"],
             end_iso=payload["end_iso"],
             target_calendar_name=payload["target_calendar_name"],
-            context=context
+            context=context,
+            recurrence=payload.get("recurrence")
         )
         return
 
     if data == "cancel_proposal":
         await db_instance.clear_pending_dialog(user.id)
         await query.edit_message_text("❌ Scheduling request cancelled.")
+        return
+
+    # Delete: first confirmation prompt (from /delete list)
+    if data.startswith("delete_ask:"):
+        event_id = data.split("delete_ask:")[-1]
+        event = await db_instance.get_tracked_event(event_id)
+        if not event:
+            await query.edit_message_text("⚠️ Event not found.")
+            return
+        short_title = event["title"].replace("⏳ ", "").replace("⏳", "").strip()
+        start_fmt = format_human_datetime(event["start_iso"])
+        keyboard = [[
+            InlineKeyboardButton("🗑️ Yes, Delete It", callback_data=f"delete_confirm:{event_id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="delete_cancel")
+        ]]
+        await query.edit_message_text(
+            f"⚠️ *Confirm Deletion*\n\n"
+            f"📌 *{short_title}*\n"
+            f"🕒 {start_fmt}\n\n"
+            f"This will permanently remove the event from Google Calendar.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    # Delete: confirmed — actually delete
+    if data.startswith("delete_confirm:"):
+        event_id = data.split("delete_confirm:")[-1]
+        event = await db_instance.get_tracked_event(event_id)
+        if not event:
+            await query.edit_message_text("⚠️ Event not found.")
+            return
+        short_title = event["title"].replace("⏳ ", "").replace("⏳", "").strip()
+        try:
+            google_service_instance.delete_calendar_event(
+                calendar_id=event["calendar_id"],
+                event_id=event_id
+            )
+            # Delete linked task if present
+            task_id = event.get("task_id")
+            if task_id:
+                google_service_instance.delete_google_task(task_id)
+            # Mark deleted in DB
+            await db_instance.update_event_status(event_id, "deleted")
+            await query.edit_message_text(
+                f"🗑️ *Deleted!*\n\n"
+                f"📌 `{short_title}` has been permanently removed from Google Calendar.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Failed to delete event {event_id}: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Failed to delete event: {e}")
+        return
+
+    # Delete: cancelled
+    if data == "delete_cancel":
+        await query.edit_message_text("✅ Deletion cancelled.")
         return
 
     # Block Status: Done
@@ -680,6 +927,7 @@ def register_handlers(application):
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(CommandHandler("delete", delete_command))
 
     application.add_handler(CallbackQueryHandler(handle_callback_query))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

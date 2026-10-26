@@ -153,10 +153,26 @@ class Database:
             db.row_factory = aiosqlite.Row
             async with db.execute("""
                 SELECT * FROM tracked_events 
-                WHERE chat_id = ? AND end_iso >= ? AND status != 'completed'
+                WHERE chat_id = ? AND end_iso >= ? AND status NOT IN ('completed', 'deleted')
                 ORDER BY start_iso ASC
                 LIMIT ?
             """, (chat_id, now_utc, limit)) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(r) for r in rows]
+
+    async def search_events_by_title(self, chat_id: int, query: str, limit: int = 10) -> list[dict]:
+        """Case-insensitive partial title search across active events."""
+        now_utc = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT * FROM tracked_events
+                WHERE chat_id = ? AND end_iso >= ?
+                  AND status NOT IN ('completed', 'deleted')
+                  AND LOWER(title) LIKE ?
+                ORDER BY start_iso ASC
+                LIMIT ?
+            """, (chat_id, now_utc, f"%{query.lower()}%", limit)) as cursor:
                 rows = await cursor.fetchall()
                 return [dict(r) for r in rows]
 

@@ -180,17 +180,55 @@ class GoogleService:
         fallback_end = fallback_start + target_delta
         return fallback_start.isoformat(), fallback_end.isoformat()
 
+    # -----------------------------------------------------------------------
+    # Recurrence helper: converts simple string to RRULE
+    # -----------------------------------------------------------------------
+    _RECURRENCE_MAP = {
+        "daily":    "RRULE:FREQ=DAILY",
+        "weekly":   "RRULE:FREQ=WEEKLY",
+        "monthly":  "RRULE:FREQ=MONTHLY",
+        "weekdays": "RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+        "weekends": "RRULE:FREQ=WEEKLY;BYDAY=SA,SU",
+        "mon":      "RRULE:FREQ=WEEKLY;BYDAY=MO",
+        "tue":      "RRULE:FREQ=WEEKLY;BYDAY=TU",
+        "wed":      "RRULE:FREQ=WEEKLY;BYDAY=WE",
+        "thu":      "RRULE:FREQ=WEEKLY;BYDAY=TH",
+        "fri":      "RRULE:FREQ=WEEKLY;BYDAY=FR",
+        "sat":      "RRULE:FREQ=WEEKLY;BYDAY=SA",
+        "sun":      "RRULE:FREQ=WEEKLY;BYDAY=SU",
+    }
+
+    @classmethod
+    def _parse_recurrence(cls, recurrence_str: str | None) -> list[str] | None:
+        """
+        Converts a plain-English recurrence string from the LLM into a
+        Google Calendar RRULE list.  Returns None if not recurring.
+        """
+        if not recurrence_str:
+            return None
+        key = recurrence_str.strip().lower()
+        rrule = cls._RECURRENCE_MAP.get(key)
+        if rrule:
+            return [rrule]
+        # If the LLM already sent a raw RRULE, pass it through
+        if key.startswith("rrule:"):
+            return [recurrence_str.strip().upper()]
+        logger.warning(f"Unknown recurrence string '{recurrence_str}'; ignoring.")
+        return None
+
     def create_calendar_event(
         self,
         calendar_id: str,
         title: str,
         start_iso: str,
         end_iso: str,
-        metadata: dict = None
+        metadata: dict = None,
+        recurrence: str | None = None
     ) -> dict:
         """
         Creates an event prefixed with ⏳ in the target calendar.
         Attaches bot metadata in extendedProperties.
+        Optionally sets a recurrence rule (e.g. 'daily', 'weekly', 'weekdays').
         """
         if not self.calendar_service:
             self._init_services()
@@ -216,6 +254,11 @@ class GoogleService:
                 }
             }
         }
+
+        rrule = self._parse_recurrence(recurrence)
+        if rrule:
+            body["recurrence"] = rrule
+            logger.info(f"Setting recurrence on event: {rrule}")
 
         event = self.calendar_service.events().insert(
             calendarId=calendar_id,
@@ -262,6 +305,68 @@ class GoogleService:
         except Exception as e:
             logger.error(f"Failed to create Google Task: {e}", exc_info=True)
             return None
+
+    def delete_calendar_event(self, calendar_id: str, event_id: str) -> bool:
+        """
+        Permanently deletes a Google Calendar event by event_id.
+        Returns True on success, raises on failure.
+        """
+        if not self.calendar_service:
+            self._init_services()
+        if not self.calendar_service:
+            raise RuntimeError("Calendar service not initialized.")
+
+        self.calendar_service.events().delete(
+            calendarId=calendar_id,
+            eventId=event_id
+        ).execute()
+        logger.info(f"Deleted calendar event {event_id} from {calendar_id}")
+        return True
+
+    def delete_google_task(self, task_id: str) -> bool:
+        """
+        Deletes a linked Google Task.
+        Returns True on success, False on failure.
+        """
+        if not self.tasks_service or not task_id:
+            return False
+        try:
+            self.tasks_service.tasks().delete(
+                tasklist=Config.GOOGLE_TASKS_LIST_ID,
+                task=task_id
+            ).execute()
+            logger.info(f"Deleted Google Task {task_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete task {task_id}: {e}")
+            return False
+
+    def reschedule_calendar_event(
+        self,
+        calendar_id: str,
+        event_id: str,
+        new_start_iso: str,
+        new_end_iso: str
+    ) -> dict:
+        """
+        Patches an existing event's start/end datetime in-place (reschedule).
+        """
+        if not self.calendar_service:
+            self._init_services()
+        if not self.calendar_service:
+            raise RuntimeError("Calendar service not initialized.")
+
+        body = {
+            "start": {"dateTime": new_start_iso},
+            "end": {"dateTime": new_end_iso}
+        }
+        patched = self.calendar_service.events().patch(
+            calendarId=calendar_id,
+            eventId=event_id,
+            body=body
+        ).execute()
+        logger.info(f"Rescheduled event {event_id}: {new_start_iso} → {new_end_iso}")
+        return patched
 
     def move_calendar_event(self, source_cal_id: str, dest_cal_id: str, event_id: str) -> dict:
         """

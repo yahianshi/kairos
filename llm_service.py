@@ -9,25 +9,29 @@ logger = logging.getLogger(__name__)
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+# -----------------------------------------------------------------------
+# Tool schemas
+# -----------------------------------------------------------------------
+
 SCHEDULE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "schedule_session",
-        "description": "Schedule a study, work, or personal session into Google Calendar and Google Tasks.",
+        "description": "Schedule a new event/session in Google Calendar.",
         "parameters": {
             "type": "object",
             "properties": {
                 "title": {
                     "type": "string",
-                    "description": "Concise, descriptive title without emoji prefixes."
+                    "description": "Concise, descriptive title without emoji."
                 },
                 "start_iso": {
                     "type": "string",
-                    "description": "ISO 8601 start datetime with timezone offset, e.g. YYYY-MM-DDTHH:MM:SS+03:00."
+                    "description": "ISO 8601 start datetime with timezone offset, e.g. 2026-10-21T10:00:00+03:00."
                 },
                 "end_iso": {
                     "type": "string",
-                    "description": "ISO 8601 end datetime with timezone offset, e.g. YYYY-MM-DDTHH:MM:SS+03:00."
+                    "description": "ISO 8601 end datetime with timezone offset."
                 },
                 "target_calendar_name": {
                     "type": "string",
@@ -40,12 +44,73 @@ SCHEDULE_TOOL_SCHEMA = {
                         "University Studying",
                         "uncertain"
                     ]
+                },
+                "recurrence": {
+                    "type": "string",
+                    "description": (
+                        "Optional recurrence. Use one of: daily, weekly, monthly, "
+                        "weekdays, weekends, mon, tue, wed, thu, fri, sat, sun. "
+                        "Omit for a one-off event."
+                    )
                 }
             },
             "required": ["title", "start_iso", "end_iso", "target_calendar_name"]
         }
     }
 }
+
+DELETE_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "delete_session",
+        "description": (
+            "Delete or remove a calendar event that was previously scheduled by the bot. "
+            "Use this when the user says 'delete', 'remove', 'cancel' an event they mention by name."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "search_title": {
+                    "type": "string",
+                    "description": "Partial or full title of the event to delete (case-insensitive match)."
+                }
+            },
+            "required": ["search_title"]
+        }
+    }
+}
+
+RESCHEDULE_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "reschedule_session",
+        "description": (
+            "Move an existing calendar event to a new time. "
+            "Use this when the user says 'reschedule', 'move', 'change the time of' an existing event."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "search_title": {
+                    "type": "string",
+                    "description": "Partial or full title of the event to reschedule (case-insensitive match)."
+                },
+                "new_start_iso": {
+                    "type": "string",
+                    "description": "New ISO 8601 start datetime with timezone offset."
+                },
+                "new_end_iso": {
+                    "type": "string",
+                    "description": "New ISO 8601 end datetime with timezone offset."
+                }
+            },
+            "required": ["search_title", "new_start_iso", "new_end_iso"]
+        }
+    }
+}
+
+ALL_TOOLS = [SCHEDULE_TOOL_SCHEMA, DELETE_TOOL_SCHEMA, RESCHEDULE_TOOL_SCHEMA]
+
 
 class LLMService:
     def __init__(self):
@@ -56,46 +121,49 @@ class LLMService:
         tz = Config.USER_TIMEZONE
         now = datetime.now(tz)
         formatted_now = now.strftime("%A, %Y-%m-%d %H:%M:%S (UTC%z)")
+        tz_offset = f"{now.strftime('%z')[:3]}:{now.strftime('%z')[3:]}"
 
-        return f"""You are Kairos, an AI auto-scheduler for Google Calendar & Google Tasks.
+        return f"""You are Kairos, an AI scheduler for Google Calendar & Tasks.
 Current Time: {formatted_now}
 Timezone: {Config.USER_TIMEZONE_STR}
 
 CALENDARS:
-- "Personal": errands, gym, medical, leisure, meals
-- "Assistant work": grading, office hours, teaching assistant tasks
-- "Quizzez / FInals": exams, tests, quizzes, finals prep
-- "Self Studying": independent coding, tech books, non-university study
-- "Uni Classes": lectures, scheduled labs, mandatory classes
-- "University Studying": university homework, course assignments, problem sets
-- "uncertain": when intent is ambiguous
+- "Personal": errands, gym, medical, leisure
+- "Assistant work": grading, office hours, TA tasks
+- "Quizzez / FInals": exams, tests, quizzes
+- "Self Studying": independent study, coding, non-uni reading
+- "Uni Classes": lectures, mandatory labs
+- "University Studying": uni homework, assignments, problem sets
+- "uncertain": ambiguous intent
 
-SCHEDULING RULE:
-When the user asks to schedule, plan, or block time, output ONLY this exact JSON format:
-```json
-{{
-  "title": "<title without emoji>",
-  "start_iso": "YYYY-MM-DDTHH:MM:SS{now.strftime('%z')[:3]}:{now.strftime('%z')[3:]}",
-  "end_iso": "YYYY-MM-DDTHH:MM:SS{now.strftime('%z')[:3]}:{now.strftime('%z')[3:]}",
-  "target_calendar_name": "Personal" | "Assistant work" | "Quizzez / FInals" | "Self Studying" | "Uni Classes" | "University Studying" | "uncertain"
-}}
-```
-- If duration is not specified, assume 1 hour.
-- If chatting, asking general questions, or discussing past tasks, reply conversationally with normal text.
+RULES:
+1. SCHEDULE: Call schedule_session when user wants to add/plan/block time.
+   JSON format: {{"title":"...","start_iso":"YYYY-MM-DDTHH:MM:SS{tz_offset}","end_iso":"YYYY-MM-DDTHH:MM:SS{tz_offset}","target_calendar_name":"...","recurrence":"daily|weekly|monthly|weekdays|weekends|mon..sun (omit if one-off)"}}
+   Default duration = 1 hour if not specified.
+
+2. DELETE: Call delete_session when user says "delete", "remove", or "cancel" a named event.
+   JSON format: {{"search_title":"<partial event name>"}}
+
+3. RESCHEDULE: Call reschedule_session when user says "reschedule", "move", or "change the time of" an event.
+   JSON format: {{"search_title":"<partial event name>","new_start_iso":"...","new_end_iso":"..."}}
+   IMPORTANT: Never call schedule_session for a reschedule request — always call reschedule_session.
+
+4. For general conversation, questions, or status queries: reply with plain text only (no tool call).
 """
 
-    def _extract_json_from_text(self, text: str) -> dict | None:
-        """Robustly extracts and validates schedule JSON from model text content."""
+    def _extract_json_from_text(self, text: str) -> tuple[str | None, dict | None]:
+        """
+        Robustly extracts and validates tool JSON from model text content.
+        Returns (tool_name, args_dict) or (None, None).
+        """
         if not text:
-            return None
+            return None, None
 
         candidate = None
-        # Try ```json ... ``` codeblock
         code_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
         if code_block:
             candidate = code_block.group(1)
         else:
-            # Find outermost { ... }
             start = text.find("{")
             end = text.rfind("}")
             if start != -1 and end != -1 and end > start:
@@ -104,21 +172,29 @@ When the user asks to schedule, plan, or block time, output ONLY this exact JSON
         if candidate:
             try:
                 data = json.loads(candidate)
-                if isinstance(data, dict):
-                    # Verify required keys
-                    if all(k in data for k in ["title", "start_iso", "end_iso"]):
-                        # Ensure target_calendar_name has a default if missing
-                        if "target_calendar_name" not in data:
-                            data["target_calendar_name"] = "uncertain"
-                        return data
+                if not isinstance(data, dict):
+                    return None, None
+
+                # Determine tool from keys present
+                if all(k in data for k in ["title", "start_iso", "end_iso"]):
+                    if "target_calendar_name" not in data:
+                        data["target_calendar_name"] = "uncertain"
+                    return "schedule_session", data
+
+                if "search_title" in data and "new_start_iso" in data:
+                    return "reschedule_session", data
+
+                if "search_title" in data:
+                    return "delete_session", data
+
             except Exception:
                 pass
-        return None
+        return None, None
 
     async def parse_user_request(self, user_message: str, chat_history: list[dict] = None) -> dict:
         """
-        Sends request to OpenRouter with fallback models and hybrid parsing
-        (native tool_calls + direct JSON extraction).
+        Sends request to OpenRouter with fallback models and hybrid parsing.
+        Returns a dict with keys: is_tool_call, tool_name, arguments, reply_text.
         """
         if not self.api_key:
             return {
@@ -128,13 +204,9 @@ When the user asks to schedule, plan, or block time, output ONLY this exact JSON
                 "reply_text": "Error: OPENROUTER_API_KEY is not configured."
             }
 
-        messages = [
-            {"role": "system", "content": self._build_system_prompt()}
-        ]
-
+        messages = [{"role": "system", "content": self._build_system_prompt()}]
         if chat_history:
             messages.extend(chat_history)
-
         messages.append({"role": "user", "content": user_message})
 
         headers = {
@@ -146,12 +218,11 @@ When the user asks to schedule, plan, or block time, output ONLY this exact JSON
 
         payload = {
             "messages": messages,
-            "tools": [SCHEDULE_TOOL_SCHEMA],
+            "tools": ALL_TOOLS,
             "tool_choice": "auto",
             "temperature": 0.1
         }
 
-        # Use OpenRouter fallback models array if multiple models configured
         if len(self.models) > 1:
             payload["models"] = self.models[:3]
         elif self.models:
@@ -161,7 +232,10 @@ When the user asks to schedule, plan, or block time, output ONLY this exact JSON
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(OPENROUTER_API_URL, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=45)) as resp:
+                async with session.post(
+                    OPENROUTER_API_URL, headers=headers, json=payload,
+                    timeout=aiohttp.ClientTimeout(total=45)
+                ) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
                         logger.error(f"OpenRouter API error (HTTP {resp.status}): {error_text}")
@@ -169,7 +243,7 @@ When the user asks to schedule, plan, or block time, output ONLY this exact JSON
                             "is_tool_call": False,
                             "tool_name": None,
                             "arguments": None,
-                            "reply_text": f"⚠️ LLM API Error ({resp.status}). Please check your OpenRouter API key and model quota."
+                            "reply_text": f"⚠️ LLM API Error ({resp.status}). Check OpenRouter API key and model quota."
                         }
 
                     data = await resp.json()
@@ -205,19 +279,19 @@ When the user asks to schedule, plan, or block time, output ONLY this exact JSON
                             "reply_text": message.get("content")
                         }
 
-                    # Strategy 2: Extract JSON from content (in case model output raw JSON or markdown block)
+                    # Strategy 2: Extract JSON from content
                     content = message.get("content", "")
-                    extracted_args = self._extract_json_from_text(content)
-                    if extracted_args:
-                        logger.info("Successfully extracted schedule JSON from model message content.")
+                    tool_name, extracted_args = self._extract_json_from_text(content)
+                    if tool_name and extracted_args:
+                        logger.info(f"Extracted '{tool_name}' JSON from model content.")
                         return {
                             "is_tool_call": True,
-                            "tool_name": "schedule_session",
+                            "tool_name": tool_name,
                             "arguments": extracted_args,
                             "reply_text": None
                         }
 
-                    # Strategy 3: Standard conversational text
+                    # Strategy 3: Conversational text
                     return {
                         "is_tool_call": False,
                         "tool_name": None,
@@ -231,8 +305,9 @@ When the user asks to schedule, plan, or block time, output ONLY this exact JSON
                 "is_tool_call": False,
                 "tool_name": None,
                 "arguments": None,
-                "reply_text": f"⚠️ An error occurred while communicating with the AI service: {e}"
+                "reply_text": f"⚠️ Error communicating with AI service: {e}"
             }
+
 
 # Global instance
 llm_service_instance = LLMService()
