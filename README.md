@@ -57,12 +57,22 @@ Classifies your sessions into your designated Google Calendars:
 - **Interactive Time Grids**: One-tap reschedule options (`Today 3 PM`, `Tomorrow 9 AM`, `Next Free Slot`, or custom time input).
 - **Time Picker**: Suggested time grid when scheduling an activity without specifying a time.
 
-### ⏳ The Accountability Loop (APScheduler)
+### ⏳ The Accountability Loop & 2-Way Sync (APScheduler)
 - Background loop inspects blocks the moment they conclude.
 - Pings you on Telegram with three actionable choices:
   - **`[✅ Done]`**: Moves event via `events.move` to `"Completed Tasks"`, changes badge from `⏳` to `✅`, and marks the companion Google Task as completed.
   - **`[⏳ Working on it]`**: Prompts for extension minutes (`+15m`, `+30m`, `+45m`, `+60m`, `+90m`, or custom numerical reply), extends the calendar block, and shifts the task due time.
   - **`[🔄 Reschedule]`**: Finds the next open gap and reschedules both event and task.
+- **🔄 Two-Way Google Tasks Sync**:
+  - If you check off a task directly inside the Google Calendar UI or the Google Tasks mobile/web app, Kairos's background sync (every 60s) automatically detects the completion!
+  - It moves the corresponding Google Calendar event to `"Completed Tasks"`, replaces `⏳` with `✅`, updates the local database, and notifies you on Telegram.
+
+### 🕰️ Past Sessions & Completion Review (`/past` or `/review`)
+- Review ended or past sessions whenever you miss or dismiss a post-block check-in.
+- Interactive inline buttons on every session:
+  - `[✅ Done]`: Marks completed, moves to `"Completed Tasks"`, and checks off Google Task.
+  - `[↩️ Not Done]`: Reopens a completed session, moves it back to its original category calendar, and sets the Google Task back to pending (`needsAction`).
+  - `[⏳+ Extend]`, `[🔄 Reschedule]`, and `[🗑️ Delete]`.
 
 ### 📋 Companion Google Tasks Integration
 - For personal `@gmail.com` accounts, links Google Tasks using OAuth2 refresh tokens.
@@ -80,11 +90,13 @@ flowchart TD
     Bot <--> GC[Google Calendar API<br/>freebusy / events insert, patch, move, delete]
     Bot <--> GT[Google Tasks API<br/>tasks insert, patch, delete]
     
-    subgraph Background Accountability & Reminder Loops
+    subgraph Background Accountability & Sync Loops
         APS[APScheduler<br/>AsyncIOScheduler (60s tick)] -->|Scan finished blocks| CheckOut[Accountability Check-In]
         APS -->|Scan blocks starting in ~10m| PreAlert[Pre-Event Reminder Alert]
+        APS -->|Poll completed Google Tasks| TasksSync[2-Way Google Tasks Sync]
         CheckOut --> Bot
         PreAlert --> Bot
+        TasksSync --> Bot
     end
 ```
 
@@ -210,8 +222,9 @@ Deploy as a **Web Service** on Render:
 
 | Command / Trigger | Action |
 |---|---|
-| `/start` | Welcome card with persistent main-menu keyboard (`[📅 Schedule] [📋 My Events] [🗑️ Delete] [❓ Help]`) |
+| `/start` | Welcome card with persistent main-menu keyboard (`[📅 Schedule] [📋 Upcoming] [🕰️ Past / Review] [🗑️ Delete] [❓ Help]`) |
 | `/status` | Live connection diagnostics + numbered session dashboard with per-event inline buttons (`✅ ⏳+ 🔄 🗑️`) |
+| `/past` or `/review` | Past & ended sessions review dashboard with buttons (`✅ Done`, `↩️ Not Done`, `⏳+`, `🔄`, `🗑️`) |
 | `/delete` | Lists active sessions with 1-tap delete buttons and confirmation safeguard |
 | `/cancel` | Aborts any active pending dialog (custom extension, reschedule time, etc.) |
 | `/help` | Detailed feature cheatsheet and syntax examples |

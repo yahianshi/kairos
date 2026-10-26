@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -17,7 +18,7 @@ class AccountabilityScheduler:
         self.bot = bot
 
     def start(self):
-        """Starts the periodic accountability loop and pre-event reminder checks."""
+        """Starts the periodic accountability loop, pre-event reminder checks, and Google Tasks sync."""
         self.scheduler.add_job(
             self.check_ended_events,
             "interval",
@@ -32,8 +33,15 @@ class AccountabilityScheduler:
             id="upcoming_reminders_check",
             replace_existing=True
         )
+        self.scheduler.add_job(
+            self.sync_completed_tasks,
+            "interval",
+            seconds=60,
+            id="sync_completed_tasks",
+            replace_existing=True
+        )
         self.scheduler.start()
-        logger.info("Accountability & Reminder loop (APScheduler) started, running every 60s.")
+        logger.info("Accountability, Reminder & Tasks Sync loop (APScheduler) started, running every 60s.")
 
     def stop(self):
         if self.scheduler.running:
@@ -152,5 +160,48 @@ class AccountabilityScheduler:
 
         except Exception as e:
             logger.error(f"Error in accountability check job: {e}", exc_info=True)
+
+    async def sync_completed_tasks(self):
+        """
+        Polls Google Tasks for tasks marked completed externally (e.g. checked off in Google Calendar
+        or Google Tasks mobile/web app). For any matching active or pending_review tracked events,
+        automatically moves them to 'Completed Tasks' calendar, replaces ⏳ with ✅, updates status
+        to 'completed' in SQLite, and notifies the user on Telegram.
+        """
+        from google_service import google_service_instance
+        try:
+            uncompleted_events = await db_instance.get_uncompleted_events_with_tasks()
+            if not uncompleted_events:
+                return
+
+            completed_task_ids = await asyncio.to_thread(google_service_instance.get_completed_tasks_set)
+            if not completed_task_ids:
+                return
+
+            for event in uncompleted_events:
+                task_id = event.get("task_id")
+                if task_id and task_id in completed_task_ids:
+                    event_id = event["event_id"]
+                    chat_id = event["chat_id"]
+                    logger.info(f"Detected Google Task completion for event {event_id} (task {task_id}). Auto-completing...")
+
+                    from bot_handlers import complete_tracked_event
+                    res = await complete_tracked_event(event_id)
+                    if res and self.bot:
+                        clean_title = res["title"].replace("✅ ", "").replace("✅", "").strip()
+                        try:
+                            await self.bot.send_message(
+                                chat_id=chat_id,
+                                text=(
+                                    f"✅ *Task Synced from Google Tasks / Calendar!*\n\n"
+                                    f"📌 *{clean_title}* was marked done in Google Tasks.\n"
+                                    f"📁 Automatically moved to *Completed Tasks* calendar."
+                                ),
+                                parse_mode=ParseMode.MARKDOWN
+                            )
+                        except Exception as send_err:
+                            logger.error(f"Failed to notify chat {chat_id} of synced task completion: {send_err}")
+        except Exception as e:
+            logger.error(f"Error in sync_completed_tasks job: {e}", exc_info=True)
 
 scheduler_instance = AccountabilityScheduler()

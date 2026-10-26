@@ -26,7 +26,9 @@ class Database:
                     chat_id INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    reminder_sent INTEGER DEFAULT 0
+                    reminder_sent INTEGER DEFAULT 0,
+                    original_calendar_id TEXT,
+                    original_calendar_name TEXT
                 )
             """)
             await db.execute("""
@@ -42,6 +44,14 @@ class Database:
                 await db.execute("ALTER TABLE tracked_events ADD COLUMN reminder_sent INTEGER DEFAULT 0")
             except Exception:
                 pass
+            try:
+                await db.execute("ALTER TABLE tracked_events ADD COLUMN original_calendar_id TEXT")
+            except Exception:
+                pass
+            try:
+                await db.execute("ALTER TABLE tracked_events ADD COLUMN original_calendar_name TEXT")
+            except Exception:
+                pass
             await db.commit()
             logger.info(f"Database initialized at {self.db_path}")
 
@@ -55,15 +65,19 @@ class Database:
         start_iso: str,
         end_iso: str,
         chat_id: int,
-        status: str = "active"
+        status: str = "active",
+        original_calendar_id: str | None = None,
+        original_calendar_name: str | None = None
     ):
         now_utc = datetime.now(timezone.utc).isoformat()
+        orig_cal_id = original_calendar_id or calendar_id
+        orig_cal_name = original_calendar_name or calendar_name
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 INSERT OR REPLACE INTO tracked_events 
-                (event_id, calendar_id, calendar_name, task_id, title, start_iso, end_iso, status, chat_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (event_id, calendar_id, calendar_name, task_id, title, start_iso, end_iso, status, chat_id, now_utc, now_utc))
+                (event_id, calendar_id, calendar_name, task_id, title, start_iso, end_iso, status, chat_id, created_at, updated_at, original_calendar_id, original_calendar_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (event_id, calendar_id, calendar_name, task_id, title, start_iso, end_iso, status, chat_id, now_utc, now_utc, orig_cal_id, orig_cal_name))
             await db.commit()
 
     async def get_tracked_event(self, event_id: str) -> dict | None:
@@ -123,6 +137,72 @@ class Database:
                 WHERE event_id = ?
             """, (new_calendar_id, new_calendar_name, new_title, status, now_utc, event_id))
             await db.commit()
+
+    async def update_event_completed(
+        self,
+        event_id: str,
+        completed_cal_id: str,
+        new_title: str,
+        orig_cal_id: str | None = None,
+        orig_cal_name: str | None = None
+    ):
+        now_utc = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                UPDATE tracked_events 
+                SET calendar_id = ?, calendar_name = 'Completed Tasks', title = ?, status = 'completed', updated_at = ?,
+                    original_calendar_id = COALESCE(original_calendar_id, ?),
+                    original_calendar_name = COALESCE(original_calendar_name, ?)
+                WHERE event_id = ?
+            """, (completed_cal_id, new_title, now_utc, orig_cal_id, orig_cal_name, event_id))
+            await db.commit()
+
+    async def update_event_reopened(
+        self,
+        event_id: str,
+        orig_cal_id: str,
+        orig_cal_name: str,
+        new_title: str
+    ):
+        now_utc = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                UPDATE tracked_events 
+                SET calendar_id = ?, calendar_name = ?, title = ?, status = 'active', updated_at = ?
+                WHERE event_id = ?
+            """, (orig_cal_id, orig_cal_name, new_title, now_utc, event_id))
+            await db.commit()
+
+    async def get_uncompleted_events_with_tasks(self) -> list[dict]:
+        """Returns tracked events that have a task_id and are not completed or deleted."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT * FROM tracked_events
+                WHERE task_id IS NOT NULL 
+                  AND status IN ('active', 'pending_review')
+            """) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(r) for r in rows]
+
+    async def get_past_events(self, chat_id: int, limit: int = 10) -> list[dict]:
+        """
+        Returns past events (end_iso <= now) that are not deleted,
+        ordered by most recent first.
+        """
+        now_utc = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT * FROM tracked_events
+                WHERE chat_id = ?
+                  AND status != 'deleted'
+                  AND end_iso <= ?
+                ORDER BY end_iso DESC
+                LIMIT ?
+            """, (chat_id, now_utc, limit)) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(r) for r in rows]
 
     async def set_pending_dialog(self, user_id: int, action: str, payload: dict):
         now_utc = datetime.now(timezone.utc).isoformat()

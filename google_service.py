@@ -493,6 +493,70 @@ class GoogleService:
             logger.error(f"Failed to complete task {task_id}: {e}")
             return False
 
+    def reopen_google_task(self, task_id: str) -> bool:
+        """
+        Reopens a completed Google Task (status = needsAction).
+        """
+        if not self.tasks_service:
+            self._init_services()
+        if not self.tasks_service or not task_id:
+            return False
+
+        try:
+            self.tasks_service.tasks().patch(
+                tasklist=Config.GOOGLE_TASKS_LIST_ID,
+                task=task_id,
+                body={"status": "needsAction", "completed": None}
+            ).execute()
+            logger.info(f"Reopened task {task_id} (set to needsAction).")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to reopen task {task_id}: {e}")
+            return False
+
+    def is_task_completed(self, task_id: str) -> bool:
+        """
+        Checks if a Google Task is currently marked as completed.
+        """
+        if not self.tasks_service:
+            self._init_services()
+        if not self.tasks_service or not task_id:
+            return False
+        try:
+            task = self.tasks_service.tasks().get(
+                tasklist=Config.GOOGLE_TASKS_LIST_ID,
+                task=task_id
+            ).execute()
+            return task.get("status") == "completed"
+        except Exception as e:
+            logger.debug(f"Error checking status for task {task_id}: {e}")
+            return False
+
+    def get_completed_tasks_set(self) -> set[str]:
+        """
+        Lists completed tasks in the user's tasklist and returns their task IDs.
+        """
+        if not self.tasks_service:
+            self._init_services()
+        if not self.tasks_service:
+            return set()
+        try:
+            res = self.tasks_service.tasks().list(
+                tasklist=Config.GOOGLE_TASKS_LIST_ID,
+                showCompleted=True,
+                showHidden=True,
+                maxResults=100
+            ).execute()
+            items = res.get("items", [])
+            completed_ids = {
+                item["id"] for item in items
+                if item.get("status") == "completed"
+            }
+            return completed_ids
+        except Exception as e:
+            logger.warning(f"Error fetching completed tasks list: {e}")
+            return set()
+
     def update_google_task_due(self, task_id: str, new_due_iso: str) -> bool:
         """
         Updates due date of linked Google Task.

@@ -63,10 +63,13 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📅 Schedule", callback_data="menu:schedule"),
-            InlineKeyboardButton("📋 My Events", callback_data="menu:events"),
+            InlineKeyboardButton("📋 Upcoming", callback_data="menu:events"),
         ],
         [
+            InlineKeyboardButton("🕰️ Past / Review", callback_data="menu:past"),
             InlineKeyboardButton("🗑️ Delete Event", callback_data="menu:delete"),
+        ],
+        [
             InlineKeyboardButton("❓ Help", callback_data="menu:help"),
         ],
     ])
@@ -83,6 +86,123 @@ def event_action_keyboard(event_id: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🗑️ Delete", callback_data=f"ev_del_ask:{event_id}"),
         ],
     ])
+
+async def complete_tracked_event(event_id: str) -> dict | None:
+    """
+    Marks an event as completed:
+    - Moves event to 'Completed Tasks' calendar in Google Calendar
+    - Patches summary with ✅
+    - Marks linked Google Task as completed
+    - Updates SQLite status to 'completed'
+    """
+    event = await db_instance.get_tracked_event(event_id)
+    if not event:
+        return None
+
+    completed_cal_id = Config.get_calendar_id("Completed Tasks")
+    if not completed_cal_id:
+        logger.warning("'Completed Tasks' calendar not configured.")
+        return None
+
+    orig_cal_id = event.get("original_calendar_id") or event["calendar_id"]
+    orig_cal_name = event.get("original_calendar_name") or event["calendar_name"]
+
+    try:
+        if event["calendar_id"] != completed_cal_id:
+            google_service_instance.move_calendar_event(
+                source_cal_id=event["calendar_id"],
+                dest_cal_id=completed_cal_id,
+                event_id=event_id
+            )
+
+        old_title = event["title"]
+        new_title = old_title.replace("⏳", "✅").strip()
+        if not new_title.startswith("✅"):
+            new_title = f"✅ {new_title}"
+
+        google_service_instance.patch_calendar_event_title(
+            calendar_id=completed_cal_id,
+            event_id=event_id,
+            new_title=new_title
+        )
+
+        task_id = event.get("task_id")
+        if task_id:
+            google_service_instance.complete_google_task(task_id)
+
+        await db_instance.update_event_completed(
+            event_id=event_id,
+            completed_cal_id=completed_cal_id,
+            new_title=new_title,
+            orig_cal_id=orig_cal_id,
+            orig_cal_name=orig_cal_name
+        )
+
+        event["title"] = new_title
+        event["status"] = "completed"
+        return event
+
+    except Exception as e:
+        logger.error(f"Error completing event {event_id}: {e}", exc_info=True)
+        return None
+
+async def reopen_tracked_event(event_id: str) -> dict | None:
+    """
+    Reopens a completed event:
+    - Moves event from 'Completed Tasks' back to its original category calendar
+    - Patches summary replacing ✅ with ⏳
+    - Marks linked Google Task as needsAction
+    - Updates SQLite status back to 'active'
+    """
+    event = await db_instance.get_tracked_event(event_id)
+    if not event:
+        return None
+
+    orig_cal_id = event.get("original_calendar_id")
+    orig_cal_name = event.get("original_calendar_name") or "Personal"
+    if not orig_cal_id:
+        orig_cal_id = Config.get_calendar_id(orig_cal_name)
+
+    completed_cal_id = Config.get_calendar_id("Completed Tasks")
+
+    try:
+        target_cal_id = orig_cal_id or event["calendar_id"]
+        if target_cal_id and event["calendar_id"] == completed_cal_id:
+            google_service_instance.move_calendar_event(
+                source_cal_id=completed_cal_id,
+                dest_cal_id=target_cal_id,
+                event_id=event_id
+            )
+
+        old_title = event["title"]
+        new_title = old_title.replace("✅", "⏳").strip()
+        if not new_title.startswith("⏳"):
+            new_title = f"⏳ {new_title}"
+
+        google_service_instance.patch_calendar_event_title(
+            calendar_id=target_cal_id,
+            event_id=event_id,
+            new_title=new_title
+        )
+
+        task_id = event.get("task_id")
+        if task_id:
+            google_service_instance.reopen_google_task(task_id)
+
+        await db_instance.update_event_reopened(
+            event_id=event_id,
+            orig_cal_id=target_cal_id,
+            orig_cal_name=orig_cal_name,
+            new_title=new_title
+        )
+
+        event["title"] = new_title
+        event["status"] = "active"
+        return event
+
+    except Exception as e:
+        logger.error(f"Error reopening event {event_id}: {e}", exc_info=True)
+        return None
 
 # =====================================================================
 # COMMAND HANDLERS
@@ -129,14 +249,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '• _"Schedule a daily gym at 7 AM for 45 mins"_\n\n'
         "📋 *Commands:*\n"
         "  /status — view & manage upcoming sessions\n"
+        "  /past or /review — view ended sessions & review completion\n"
         "  /delete — pick an event to delete\n"
         "  /cancel — cancel current action\n"
         "  /help — this message\n\n"
-        "⏰ *Accountability Loop:*\n"
-        "When a block ends, Kairos pings you:\n"
-        "  ✅ Done → moved to Completed Tasks\n"
-        "  ⏳ Extend → extends block + task\n"
-        "  🔄 Reschedule → finds next free slot\n\n"
+        "⏰ *Accountability & 2-Way Sync:*\n"
+        "• When a block ends, Kairos pings you for completion.\n"
+        "• If you mark a task done in Google Calendar / Tasks app, Kairos auto-syncs it to Completed Tasks!\n"
+        "• Reopen or review any past session anytime with /past.\n\n"
         "🔁 *Recurrence:* daily · weekly · monthly · weekdays · weekends · mon–sun"
     )
     await update.message.reply_text(
@@ -258,6 +378,62 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\n".join(lines),
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.MARKDOWN
+    )
+
+
+async def past_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Displays past / ended sessions (especially ones missed for review)
+    with interactive buttons to mark as Done, Reopen (Not Done), Reschedule, or Delete.
+    """
+    user = update.effective_user
+    if not is_authorized(user.id):
+        return
+
+    chat_id = update.effective_chat.id
+    past_events = await db_instance.get_past_events(chat_id, limit=8)
+
+    if not past_events:
+        await update.message.reply_text(
+            "📭 *No past sessions found in database.*",
+            reply_markup=main_menu_keyboard(),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    lines = ["🕰️ *Past Sessions & Completion Review:*\n"]
+    keyboard = []
+
+    for i, ev in enumerate(past_events, 1):
+        status = ev["status"]
+        title_clean = ev["title"].replace("⏳ ", "").replace("⏳", "").replace("✅ ", "").replace("✅", "").strip()
+        start_fmt = format_human_datetime(ev["start_iso"])
+        end_time = format_human_datetime(ev["end_iso"]).split(" at ")[-1]
+        dur = format_duration(ev["start_iso"], ev["end_iso"])
+
+        if status == "completed":
+            badge = "✅ Completed"
+            lines.append(f"*{i}.* ✅ `{title_clean}`\n   🕒 {start_fmt} – {end_time}  _{dur}_ · {badge}")
+            keyboard.append([
+                InlineKeyboardButton(f"{i}: ↩️ Not Done", callback_data=f"ev_undone:{ev['event_id']}"),
+                InlineKeyboardButton(f"{i}: 🗑️ Delete", callback_data=f"ev_del_ask:{ev['event_id']}")
+            ])
+        else:
+            badge = "⏳ Needs Review" if status == "pending_review" else "⏳ Ended"
+            lines.append(f"*{i}.* ⏳ *{title_clean}*\n   🕒 {start_fmt} – {end_time}  _{dur}_ · _{badge}_")
+            keyboard.append([
+                InlineKeyboardButton(f"{i}: ✅ Done", callback_data=f"ev_done:{ev['event_id']}"),
+                InlineKeyboardButton(f"{i}: ⏳+", callback_data=f"ev_extend:{ev['event_id']}"),
+                InlineKeyboardButton(f"{i}: 🔄", callback_data=f"ev_resched_menu:{ev['event_id']}"),
+                InlineKeyboardButton(f"{i}: 🗑️", callback_data=f"ev_del_ask:{ev['event_id']}")
+            ])
+
+    lines.append("\n_Buttons: ✅ Done · ↩️ Not Done · ⏳+ Extend · 🔄 Reschedule_")
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 # =====================================================================
@@ -913,6 +1089,51 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
+    if data == "menu:past":
+        past_events = await db_instance.get_past_events(chat_id, limit=8)
+        if not past_events:
+            await query.edit_message_text(
+                "📭 *No past sessions found in database.*",
+                reply_markup=main_menu_keyboard(),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+        lines = ["🕰️ *Past Sessions & Completion Review:*\n"]
+        keyboard = []
+
+        for i, ev in enumerate(past_events, 1):
+            status = ev["status"]
+            title_clean = ev["title"].replace("⏳ ", "").replace("⏳", "").replace("✅ ", "").replace("✅", "").strip()
+            start_fmt = format_human_datetime(ev["start_iso"])
+            end_time = format_human_datetime(ev["end_iso"]).split(" at ")[-1]
+            dur = format_duration(ev["start_iso"], ev["end_iso"])
+
+            if status == "completed":
+                badge = "✅ Completed"
+                lines.append(f"*{i}.* ✅ `{title_clean}`\n   🕒 {start_fmt} – {end_time}  _{dur}_ · {badge}")
+                keyboard.append([
+                    InlineKeyboardButton(f"{i}: ↩️ Not Done", callback_data=f"ev_undone:{ev['event_id']}"),
+                    InlineKeyboardButton(f"{i}: 🗑️ Delete", callback_data=f"ev_del_ask:{ev['event_id']}")
+                ])
+            else:
+                badge = "⏳ Needs Review" if status == "pending_review" else "⏳ Ended"
+                lines.append(f"*{i}.* ⏳ *{title_clean}*\n   🕒 {start_fmt} – {end_time}  _{dur}_ · _{badge}_")
+                keyboard.append([
+                    InlineKeyboardButton(f"{i}: ✅ Done", callback_data=f"ev_done:{ev['event_id']}"),
+                    InlineKeyboardButton(f"{i}: ⏳+", callback_data=f"ev_extend:{ev['event_id']}"),
+                    InlineKeyboardButton(f"{i}: 🔄", callback_data=f"ev_resched_menu:{ev['event_id']}"),
+                    InlineKeyboardButton(f"{i}: 🗑️", callback_data=f"ev_del_ask:{ev['event_id']}")
+                ])
+
+        lines.append("\n_Buttons: ✅ Done · ↩️ Not Done · ⏳+ Extend · 🔄 Reschedule_")
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
     if data == "menu:delete":
         upcoming = await db_instance.get_upcoming_events(chat_id, limit=10)
         if not upcoming:
@@ -1286,38 +1507,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # ── Per-event: Mark Done ──────────────────────────────────────────
     if data.startswith("ev_done:") or data.startswith("status_done:"):
         event_id = data.split(":", 1)[-1]
-        event = await db_instance.get_tracked_event(event_id)
-        if not event:
-            await query.edit_message_text("⚠️ Event record not found.")
-            return
-
-        completed_cal_id = Config.get_calendar_id("Completed Tasks")
-        if not completed_cal_id:
-            await query.edit_message_text("⚠️ 'Completed Tasks' calendar not configured.")
-            return
-
-        try:
-            google_service_instance.move_calendar_event(
-                source_cal_id=event["calendar_id"],
-                dest_cal_id=completed_cal_id,
-                event_id=event_id
-            )
-            old_title = event["title"]
-            new_title = old_title.replace("⏳", "✅").strip()
-            if not new_title.startswith("✅"):
-                new_title = f"✅ {new_title}"
-            google_service_instance.patch_calendar_event_title(
-                calendar_id=completed_cal_id,
-                event_id=event_id,
-                new_title=new_title
-            )
-            task_id = event.get("task_id")
-            if task_id:
-                google_service_instance.complete_google_task(task_id)
-            await db_instance.update_event_calendar(
-                event_id=event_id, new_calendar_id=completed_cal_id,
-                new_calendar_name="Completed Tasks", new_title=new_title, status="completed"
-            )
+        res = await complete_tracked_event(event_id)
+        if res:
+            new_title = res["title"]
             await query.edit_message_text(
                 f"🎉 *Well done!*\n\n"
                 f"📌 `{new_title}`\n"
@@ -1326,9 +1518,27 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=main_menu_keyboard()
             )
-        except Exception as e:
-            logger.error(f"Error marking done: {e}", exc_info=True)
-            await query.edit_message_text(f"❌ Error: {e}")
+        else:
+            await query.edit_message_text("⚠️ Could not mark event as completed. Please check configuration.")
+        return
+
+    # ── Per-event: Mark Not Done / Reopen ─────────────────────────────
+    if data.startswith("ev_undone:"):
+        event_id = data.split(":", 1)[-1]
+        res = await reopen_tracked_event(event_id)
+        if res:
+            new_title = res["title"]
+            cal_name = res.get("original_calendar_name") or "Personal"
+            await query.edit_message_text(
+                f"↩️ *Session Reopened!*\n\n"
+                f"📌 `{new_title}`\n"
+                f"📁 Moved back to `{cal_name}`\n"
+                f"📋 Google Task reopened (needs action).",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=main_menu_keyboard()
+            )
+        else:
+            await query.edit_message_text("⚠️ Could not reopen event.")
         return
 
     # ── Per-event: Extend ─────────────────────────────────────────────
@@ -1527,6 +1737,8 @@ def register_handlers(application):
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("past", past_command))
+    application.add_handler(CommandHandler("review", past_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CommandHandler("delete", delete_command))
 
