@@ -52,6 +52,13 @@ SCHEDULE_TOOL_SCHEMA = {
                         "weekdays, weekends, mon, tue, wed, thu, fri, sat, sun. "
                         "Omit for a one-off event."
                     )
+                },
+                "reminder_minutes": {
+                    "type": "integer",
+                    "description": (
+                        "Minutes before event start to set a notification reminder on the calendar event "
+                        "(e.g. 10, 15, 30). Defaults to 10 if a reminder is requested."
+                    )
                 }
             },
             "required": ["title", "start_iso", "end_iso", "target_calendar_name"]
@@ -138,7 +145,8 @@ CALENDARS:
 
 RULES:
 1. SCHEDULE: Call schedule_session when user wants to add/plan/block time.
-   JSON format: {{"title":"...","start_iso":"YYYY-MM-DDTHH:MM:SS{tz_offset}","end_iso":"YYYY-MM-DDTHH:MM:SS{tz_offset}","target_calendar_name":"...","recurrence":"daily|weekly|monthly|weekdays|weekends|mon..sun (omit if one-off)"}}
+   JSON format: {{"title":"...","start_iso":"YYYY-MM-DDTHH:MM:SS{tz_offset}","end_iso":"YYYY-MM-DDTHH:MM:SS{tz_offset}","target_calendar_name":"...","recurrence":"...","reminder_minutes":10}}
+   - If user requests a reminder/notification (e.g. "reminder 10m before", "add notification 15 mins before"), set "reminder_minutes" to that integer (default 10).
    Default duration = 1 hour if not specified.
 
 2. DELETE: Call delete_session when user says "delete", "remove", or "cancel" a named event.

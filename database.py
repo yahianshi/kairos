@@ -25,7 +25,8 @@ class Database:
                     status TEXT NOT NULL,
                     chat_id INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    reminder_sent INTEGER DEFAULT 0
                 )
             """)
             await db.execute("""
@@ -36,6 +37,11 @@ class Database:
                     created_at TEXT NOT NULL
                 )
             """)
+            # Migration check for existing DBs
+            try:
+                await db.execute("ALTER TABLE tracked_events ADD COLUMN reminder_sent INTEGER DEFAULT 0")
+            except Exception:
+                pass
             await db.commit()
             logger.info(f"Database initialized at {self.db_path}")
 
@@ -192,6 +198,33 @@ class Database:
             """, (chat_id, end_iso, start_iso)) as cursor:
                 rows = await cursor.fetchall()
                 return [dict(r) for r in rows]
+
+    async def get_events_due_for_reminder(self, window_start_iso: str, window_end_iso: str) -> list[dict]:
+        """
+        Returns active events starting within [window_start_iso, window_end_iso]
+        where reminder_sent = 0.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT * FROM tracked_events 
+                WHERE status = 'active' 
+                  AND (reminder_sent IS NULL OR reminder_sent = 0)
+                  AND start_iso >= ? AND start_iso <= ?
+                ORDER BY start_iso ASC
+            """, (window_start_iso, window_end_iso)) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(r) for r in rows]
+
+    async def mark_reminder_sent(self, event_id: str):
+        now_utc = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                UPDATE tracked_events 
+                SET reminder_sent = 1, updated_at = ?
+                WHERE event_id = ?
+            """, (now_utc, event_id))
+            await db.commit()
 
 # Global DB instance
 db_instance = Database()

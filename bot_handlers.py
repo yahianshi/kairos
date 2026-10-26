@@ -272,7 +272,8 @@ async def schedule_and_reply(
     end_iso: str,
     target_calendar_name: str,
     context: ContextTypes.DEFAULT_TYPE,
-    recurrence: str | None = None
+    recurrence: str | None = None,
+    reminder_minutes: int | None = 10
 ):
     """
     Performs availability checking, inserts the Google Calendar event + Task,
@@ -350,7 +351,8 @@ async def schedule_and_reply(
                         "start_iso": start_iso,
                         "end_iso": end_iso,
                         "target_calendar_name": target_calendar_name,
-                        "recurrence": recurrence
+                        "recurrence": recurrence,
+                        "reminder_minutes": reminder_minutes
                     }
                 }
             except Exception as ex:
@@ -362,6 +364,7 @@ async def schedule_and_reply(
             "end_iso": next_end_iso,
             "target_calendar_name": target_calendar_name,
             "recurrence": recurrence,
+            "reminder_minutes": reminder_minutes,
             "trim_info": trim_info
         }
         await db_instance.set_pending_dialog(user_id, "propose_slot", proposal_payload)
@@ -409,7 +412,8 @@ async def schedule_and_reply(
             start_iso=start_iso,
             end_iso=end_iso,
             metadata={"calendar_name": target_calendar_name, "chat_id": str(chat_id)},
-            recurrence=recurrence
+            recurrence=recurrence,
+            reminder_minutes=reminder_minutes
         )
         event_id = cal_event.get("id")
 
@@ -438,13 +442,15 @@ async def schedule_and_reply(
         dur = format_duration(start_iso, end_iso)
         task_status = "✅ Created" if task_id else "⚠️ Skipped"
         recurrence_label = f"\n🔁 *Repeats:* `{recurrence}`" if recurrence else ""
+        reminder_label = f"\n🔔 *Reminder:* `{reminder_minutes}m before` (Calendar & Telegram)" if reminder_minutes else ""
 
         success_text = (
             f"✨ *Scheduled!*\n\n"
             f"📌 `{cal_event.get('summary')}`\n"
             f"📁 {target_calendar_name}\n"
             f"🕒 {start_fmt} – {end_fmt}  _{dur}_"
-            f"{recurrence_label}\n"
+            f"{recurrence_label}"
+            f"{reminder_label}\n"
             f"📋 Task: {task_status}\n\n"
             f"🔔 _I'll ping you when this block ends._"
         )
@@ -546,6 +552,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         end_iso = args.get("end_iso")
         target_cal = args.get("target_calendar_name")
         recurrence = args.get("recurrence")
+        raw_rem = args.get("reminder_minutes")
+        try:
+            reminder_minutes = int(raw_rem) if raw_rem is not None else 10
+        except Exception:
+            reminder_minutes = 10
 
         if not start_iso or not end_iso:
             # Time unclear — show quick time picker
@@ -557,14 +568,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "title": title,
                 "start_iso": start_iso,
                 "end_iso": end_iso,
-                "recurrence": recurrence
+                "recurrence": recurrence,
+                "reminder_minutes": reminder_minutes
             }
             await db_instance.set_pending_dialog(user.id, "select_calendar", pending_payload)
             await _send_calendar_picker(update, title, start_iso, end_iso, recurrence)
             return
 
         await schedule_and_reply(chat_id, user.id, title, start_iso, end_iso, target_cal, context,
-                                 recurrence=recurrence)
+                                 recurrence=recurrence, reminder_minutes=reminder_minutes)
 
     # ── delete_session ────────────────────────────────────────────────
     elif tool_name == "delete_session":
@@ -1009,7 +1021,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode=ParseMode.MARKDOWN
         )
         await schedule_and_reply(chat_id, user.id, title, start_iso, end_iso, selected_cal, context,
-                                 recurrence=recurrence)
+                                 recurrence=recurrence,
+                                 reminder_minutes=payload.get("reminder_minutes", 10))
         return
 
     # ── Accept conflict proposal ──────────────────────────────────────
@@ -1028,7 +1041,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             end_iso=payload["end_iso"],
             target_calendar_name=payload["target_calendar_name"],
             context=context,
-            recurrence=payload.get("recurrence")
+            recurrence=payload.get("recurrence"),
+            reminder_minutes=payload.get("reminder_minutes", 10)
         )
         return
 
@@ -1132,7 +1146,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 start_iso=new_ev["start_iso"],
                 end_iso=new_ev["end_iso"],
                 metadata={"calendar_name": new_ev["target_calendar_name"], "chat_id": str(chat_id)},
-                recurrence=new_ev.get("recurrence")
+                recurrence=new_ev.get("recurrence"),
+                reminder_minutes=new_ev.get("reminder_minutes", 10)
             )
             new_event_id = cal_event.get("id")
 

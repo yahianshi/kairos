@@ -262,12 +262,14 @@ class GoogleService:
         start_iso: str,
         end_iso: str,
         metadata: dict = None,
-        recurrence: str | None = None
+        recurrence: str | None = None,
+        reminder_minutes: int | None = 10
     ) -> dict:
         """
         Creates an event prefixed with ⏳ in the target calendar.
         Attaches bot metadata in extendedProperties.
         Optionally sets a recurrence rule (e.g. 'daily', 'weekly', 'weekdays').
+        Configures popup notification reminders on the Google Calendar event itself.
         """
         if not self.calendar_service:
             self._init_services()
@@ -293,6 +295,19 @@ class GoogleService:
                 }
             }
         }
+
+        # Set notification reminder directly on the Google Calendar event
+        if reminder_minutes is not None and int(reminder_minutes) > 0:
+            body["reminders"] = {
+                "useDefault": False,
+                "overrides": [
+                    {"method": "popup", "minutes": int(reminder_minutes)}
+                ]
+            }
+        else:
+            body["reminders"] = {
+                "useDefault": True
+            }
 
         rrule = self._parse_recurrence(recurrence)
         if rrule:
