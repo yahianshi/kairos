@@ -27,19 +27,62 @@ ACTIVE_CALENDARS = [
     "University Studying",
 ]
 
+# =====================================================================
+# HELPERS
+# =====================================================================
+
 def is_authorized(user_id: int) -> bool:
     """Checks if user is in TELEGRAM_ALLOWED_USER_IDS."""
     if not Config.TELEGRAM_ALLOWED_USER_IDS:
-        return True  # If not configured, allow (warned in validate)
+        return True
     return user_id in Config.TELEGRAM_ALLOWED_USER_IDS
 
 def format_human_datetime(iso_str: str) -> str:
-    """Formats ISO datetime into readable string like 'Tue, Oct 21, 10:00'."""
+    """Formats ISO datetime into readable string like 'Tue, Oct 21 at 10:00'."""
     try:
         dt = datetime.fromisoformat(iso_str).astimezone(Config.USER_TIMEZONE)
         return dt.strftime("%a, %b %d at %H:%M")
     except Exception:
         return iso_str
+
+def format_duration(start_iso: str, end_iso: str) -> str:
+    """Returns human-readable duration like '1h 30m'."""
+    try:
+        start = datetime.fromisoformat(start_iso)
+        end = datetime.fromisoformat(end_iso)
+        mins = int((end - start).total_seconds() / 60)
+        if mins >= 60:
+            h, m = divmod(mins, 60)
+            return f"{h}h{f' {m}m' if m else ''}"
+        return f"{mins}m"
+    except Exception:
+        return ""
+
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+    """Returns the persistent main-menu keyboard."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📅 Schedule", callback_data="menu:schedule"),
+            InlineKeyboardButton("📋 My Events", callback_data="menu:events"),
+        ],
+        [
+            InlineKeyboardButton("🗑️ Delete Event", callback_data="menu:delete"),
+            InlineKeyboardButton("❓ Help", callback_data="menu:help"),
+        ],
+    ])
+
+def event_action_keyboard(event_id: str) -> InlineKeyboardMarkup:
+    """Per-event action buttons shown after scheduling and on status detail view."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Mark Done", callback_data=f"ev_done:{event_id}"),
+            InlineKeyboardButton("⏳ Extend", callback_data=f"ev_extend:{event_id}"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Reschedule", callback_data=f"ev_resched_menu:{event_id}"),
+            InlineKeyboardButton("🗑️ Delete", callback_data=f"ev_del_ask:{event_id}"),
+        ],
+    ])
 
 # =====================================================================
 # COMMAND HANDLERS
@@ -56,22 +99,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     welcome_text = (
         f"👋 *Hello {user.first_name}!*\n\n"
-        f"I am *Kairos*, your AI Executive Auto-Scheduler for Google Calendar & Tasks.\n\n"
-        f"⚡ *Features:*\n"
-        f"• Natural language scheduling powered by LLM tool calling.\n"
-        f"• Automated routing into your designated calendars.\n"
-        f"• Conflict detection across all your calendars simultaneously.\n"
-        f"• Companion Google Tasks due 5 mins post-event.\n"
-        f"• Automated accountability checks when your block finishes!\n\n"
-        f"⚙️ *Status:*\n"
-        f"• Timezone: `{tz_name}`\n"
-        f"• Calendars configured: `{configured_cals}`\n\n"
-        f"💬 *Try saying:*\n"
-        f"_\"Schedule 2 hours of university studying for algorithms tomorrow at 2 PM\"_\n"
-        f"_\"Plan a 45 min workout this evening at 6\"_\n\n"
-        f"Use /status to see upcoming blocks or /help for more."
+        f"I am *Kairos*, your AI Executive Auto-Scheduler.\n\n"
+        f"Just *talk to me naturally* — I understand things like:\n"
+        f'_"Study algorithms tomorrow at 2 PM for 2 hours"_\n'
+        f'_"Delete my morning run"_\n'
+        f'_"Reschedule my grading session to Friday at 3 PM"_\n'
+        f'_"Every weekday gym at 7 AM"_\n\n'
+        f"⚙️ `{tz_name}` · `{configured_cals}` calendars\n\n"
+        f"Or use the quick menu below:"
     )
-    await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        welcome_text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=main_menu_keyboard()
+    )
+
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -79,31 +121,30 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     help_text = (
-        "⏳ *Kairos — AI Auto-Scheduler Help:*\n\n"
-        "1. *Scheduling:* Just type what you want to do naturally:\n"
-        "   • _\"Study linear algebra for 2 hours tomorrow at 10 AM\"_\n"
-        "   • _\"Assistant grading meeting on Thursday from 3pm to 4pm\"_\n"
-        "   • _\"Finals prep: database systems for 90 mins tonight at 8\"_\n\n"
-        "2. *Accountability Loop:*\n"
-        "   When your scheduled session finishes, Kairos will ping you with 3 options:\n"
-        "   • *Done*: Moves the event to `Completed Tasks`, changes ⏳ to ✅, and checks off the Google Task.\n"
-        "   • *Working on it*: Extends the calendar block and shifts the task due time.\n"
-        "   • *Reschedule*: Finds the next open slot on your schedule.\n\n"
-        "3. *Delete Events:*\n"
-        "   Say _\"delete my algorithms study session\"_ or use /delete to pick from a list.\n\n"
-        "4. *Recurring Events:*\n"
-        "   Say _\"schedule daily morning run at 7 AM for 30 minutes\"_ or\n"
-        "   _\"every weekday 1 hour of self study at 9 PM\"_.\n\n"
-        "5. *Reschedule:*\n"
-        "   Say _\"reschedule my algorithms session to tomorrow at 3 PM\"_\n"
-        "   (bot moves the existing event — no duplicate created).\n\n"
-        "6. *Commands:*\n"
-        "   /status - View upcoming tracked sessions\n"
-        "   /delete - Delete a scheduled event (with confirmation)\n"
-        "   /cancel - Cancel any active pending action\n"
-        "   /help - Show this message"
+        "⏳ *Kairos — Quick Reference:*\n\n"
+        "🗣️ *Just talk naturally:*\n"
+        '• _"Study linear algebra for 2h tomorrow at 10 AM"_\n'
+        '• _"Delete my database session"_\n'
+        '• _"Reschedule grading to Friday 3 PM"_\n'
+        '• _"Schedule a daily gym at 7 AM for 45 mins"_\n\n'
+        "📋 *Commands:*\n"
+        "  /status — view & manage upcoming sessions\n"
+        "  /delete — pick an event to delete\n"
+        "  /cancel — cancel current action\n"
+        "  /help — this message\n\n"
+        "⏰ *Accountability Loop:*\n"
+        "When a block ends, Kairos pings you:\n"
+        "  ✅ Done → moved to Completed Tasks\n"
+        "  ⏳ Extend → extends block + task\n"
+        "  🔄 Reschedule → finds next free slot\n\n"
+        "🔁 *Recurrence:* daily · weekly · monthly · weekdays · weekends · mon–sun"
     )
-    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        help_text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=main_menu_keyboard()
+    )
+
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -111,41 +152,61 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
-    upcoming = await db_instance.get_upcoming_events(chat_id, limit=6)
+    upcoming = await db_instance.get_upcoming_events(chat_id, limit=8)
 
-    # Check live service state
+    # Live service check
     if not google_service_instance.calendar_service:
         google_service_instance._init_services()
-
-    cal_ok = "✅ Connected" if google_service_instance.calendar_service else "❌ Not Initialized (Missing GOOGLE_SERVICE_ACCOUNT_JSON)"
-    tasks_ok = "✅ Connected" if google_service_instance.tasks_service else "⚠️ Not Configured"
+    cal_ok = "✅" if google_service_instance.calendar_service else "❌"
+    tasks_ok = "✅" if google_service_instance.tasks_service else "⚠️"
 
     diag = (
-        "⚙️ *Kairos System Diagnostics:*\n"
-        f"• *Google Calendar:* {cal_ok}\n"
-        f"• *Google Tasks:* {tasks_ok}\n"
-        f"• *Timezone:* `{Config.USER_TIMEZONE_STR}`\n"
-        f"• *Configured Calendars:* `{len(Config.GOOGLE_CALENDAR_IDS)}`\n\n"
+        f"⚙️ Calendar {cal_ok} · Tasks {tasks_ok} · "
+        f"`{Config.USER_TIMEZONE_STR}`\n\n"
     )
 
     if not upcoming:
         await update.message.reply_text(
-            f"{diag}📅 *Upcoming Blocks:* None currently scheduled.\n\n"
-            "Try: _\"Schedule 1 hour of self studying tomorrow at 10 AM\"_",
-            parse_mode=ParseMode.MARKDOWN
+            f"{diag}📭 *No upcoming sessions scheduled.*\n\n"
+            "_Use the menu below or just tell me what to schedule._",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=main_menu_keyboard()
         )
         return
 
-    lines = [f"{diag}📅 *Your Upcoming Scheduled Blocks:*\n"]
-    for ev in upcoming:
+    # Build numbered list text
+    lines = [f"{diag}📅 *Upcoming Sessions ({len(upcoming)}):*\n"]
+    keyboard = []
+
+    for i, ev in enumerate(upcoming, 1):
+        title_clean = ev["title"].replace("⏳ ", "").replace("⏳", "").strip()
         start_fmt = format_human_datetime(ev["start_iso"])
-        end_fmt = format_human_datetime(ev["end_iso"]).split(" at ")[-1]
+        end_time = format_human_datetime(ev["end_iso"]).split(" at ")[-1]
+        dur = format_duration(ev["start_iso"], ev["end_iso"])
+        cal = ev["calendar_name"]
+
         lines.append(
-            f"• *{ev['title']}*\n"
-            f"  📁 `{ev['calendar_name']}` | 🕒 {start_fmt} – {end_fmt}"
+            f"*{i}.* ⏳ {title_clean}\n"
+            f"   🕒 {start_fmt} – {end_time}  _{dur}_ · 📁 _{cal}_"
         )
 
-    await update.message.reply_text("\n\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        # Per-event action row (index-labeled so user knows which event)
+        short = title_clean[:16]
+        keyboard.append([
+            InlineKeyboardButton(f"{i}:✅", callback_data=f"ev_done:{ev['event_id']}"),
+            InlineKeyboardButton(f"{i}:⏳+", callback_data=f"ev_extend:{ev['event_id']}"),
+            InlineKeyboardButton(f"{i}:🔄", callback_data=f"ev_resched_menu:{ev['event_id']}"),
+            InlineKeyboardButton(f"{i}:🗑️", callback_data=f"ev_del_ask:{ev['event_id']}"),
+        ])
+
+    lines.append("\n_Buttons: ✅ Done · ⏳ Extend · 🔄 Reschedule · 🗑️ Delete_")
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -155,9 +216,12 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending = await db_instance.get_pending_dialog(user.id)
     if pending:
         await db_instance.clear_pending_dialog(user.id)
-        await update.message.reply_text("✅ Current pending action cancelled.")
+        await update.message.reply_text(
+            "✅ Action cancelled.",
+            reply_markup=main_menu_keyboard()
+        )
     else:
-        await update.message.reply_text("No active action to cancel.")
+        await update.message.reply_text("No active action to cancel.", reply_markup=main_menu_keyboard())
 
 
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -171,27 +235,28 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not upcoming:
         await update.message.reply_text(
-            "📅 No active scheduled events found to delete."
+            "📭 No active scheduled events found.",
+            reply_markup=main_menu_keyboard()
         )
         return
 
     lines = ["🗑️ *Select an event to delete:*\n"]
     keyboard = []
-    for ev in upcoming:
+    for i, ev in enumerate(upcoming, 1):
         start_fmt = format_human_datetime(ev["start_iso"])
         short_title = ev["title"].replace("⏳ ", "").replace("⏳", "").strip()
-        lines.append(f"• `{short_title}` — {start_fmt}")
+        lines.append(f"*{i}.* {short_title} — {start_fmt}")
         keyboard.append([
             InlineKeyboardButton(
-                f"🗑️ {short_title[:30]}",
-                callback_data=f"delete_ask:{ev['event_id']}"
+                f"🗑️ {i}. {short_title[:28]}",
+                callback_data=f"ev_del_ask:{ev['event_id']}"
             )
         ])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="delete_cancel")])
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
         "\n".join(lines),
-        reply_markup=reply_markup,
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -210,19 +275,17 @@ async def schedule_and_reply(
     recurrence: str | None = None
 ):
     """
-    Performs availability checking via freebusy across all active calendars,
-    inserts the Google Calendar event with ⏳, inserts the companion Google Task,
-    and updates SQLite state.
+    Performs availability checking, inserts the Google Calendar event + Task,
+    updates SQLite, and sends a rich success message with action buttons.
     """
     target_cal_id = Config.get_calendar_id(target_calendar_name)
     if not target_cal_id:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"❌ Error: Calendar '{target_calendar_name}' is not configured in GOOGLE_CALENDAR_IDS."
+            text=f"❌ Calendar '{target_calendar_name}' is not configured."
         )
         return
 
-    # Collect all active calendar IDs for conflict check
     active_cal_ids = [
         cid for name, cid in Config.GOOGLE_CALENDAR_IDS.items()
         if name != "Completed Tasks" and cid
@@ -239,21 +302,18 @@ async def schedule_and_reply(
         )
         return
 
-    # Handle conflict
+    # Handle conflict — propose next free slot with buttons
     if not is_free:
-        # Calculate duration in minutes
         dt_start = datetime.fromisoformat(start_iso)
         dt_end = datetime.fromisoformat(end_iso)
         duration_mins = max(15, int((dt_end - dt_start).total_seconds() / 60))
 
-        # Find next free slot
         next_start_iso, next_end_iso = google_service_instance.find_next_free_slot(
             duration_minutes=duration_mins,
             calendar_ids=active_cal_ids,
             start_search_dt=dt_start
         )
 
-        # Save proposal in pending dialogs
         proposal_payload = {
             "title": title,
             "start_iso": next_start_iso,
@@ -269,29 +329,26 @@ async def schedule_and_reply(
         next_end_fmt = format_human_datetime(next_end_iso).split(" at ")[-1]
 
         keyboard = [
-            [InlineKeyboardButton("📅 Book Proposed Slot", callback_data="accept_proposal")],
+            [InlineKeyboardButton("📅 Book This Slot", callback_data="accept_proposal")],
             [InlineKeyboardButton("❌ Dismiss", callback_data="cancel_proposal")]
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
         conflict_msg = (
-            f"⚠️ *Scheduling Conflict Detected!*\n\n"
-            f"You are already busy during `{start_fmt} – {end_fmt}`.\n\n"
-            f"💡 *Earliest Available Slot:*\n"
+            f"⚠️ *Conflict Detected!*\n\n"
+            f"Busy: `{start_fmt} – {end_fmt}`\n\n"
+            f"💡 *Next Available:*\n"
             f"🕒 *{next_start_fmt} – {next_end_fmt}*\n\n"
-            f"Would you like to schedule `{title}` in this open slot instead?"
+            f"Schedule `{title}` here instead?"
         )
         await context.bot.send_message(
             chat_id=chat_id,
             text=conflict_msg,
-            reply_markup=reply_markup,
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
         return
 
-    # No conflict: Insert Event & Task
+    # No conflict: create event + task
     try:
-        # Action A: Insert Calendar Event
         clean_title = title.replace("⏳", "").replace("✅", "").strip()
         cal_event = google_service_instance.create_calendar_event(
             calendar_id=target_cal_id,
@@ -303,17 +360,14 @@ async def schedule_and_reply(
         )
         event_id = cal_event.get("id")
 
-        # Action B: Insert Linked Google Task (Due = end_iso + 5 minutes)
         dt_end = datetime.fromisoformat(end_iso)
         task_due = dt_end + timedelta(minutes=5)
-        task_notes = f"Linked to Calendar block: {cal_event.get('summary')} in '{target_calendar_name}'"
         task_id = google_service_instance.create_google_task(
             title=clean_title,
             due_iso=task_due.isoformat(),
-            notes=task_notes
+            notes=f"Linked calendar block in '{target_calendar_name}'"
         )
 
-        # Action C: Track in SQLite DB
         await db_instance.add_tracked_event(
             event_id=event_id,
             calendar_id=target_cal_id,
@@ -328,23 +382,37 @@ async def schedule_and_reply(
 
         start_fmt = format_human_datetime(start_iso)
         end_fmt = format_human_datetime(end_iso).split(" at ")[-1]
-        task_status_text = "✅ Created (Due 5m post-session)" if task_id else "⚠️ Skipped (Check Tasks credentials)"
-
+        dur = format_duration(start_iso, end_iso)
+        task_status = "✅ Created" if task_id else "⚠️ Skipped"
         recurrence_label = f"\n🔁 *Repeats:* `{recurrence}`" if recurrence else ""
+
         success_text = (
-            f"✨ *Session Successfully Scheduled!*\n\n"
-            f"📌 *Event:* `{cal_event.get('summary')}`\n"
-            f"📁 *Calendar:* `{target_calendar_name}`\n"
-            f"🕒 *Time:* {start_fmt} – {end_fmt}"
+            f"✨ *Scheduled!*\n\n"
+            f"📌 `{cal_event.get('summary')}`\n"
+            f"📁 {target_calendar_name}\n"
+            f"🕒 {start_fmt} – {end_fmt}  _{dur}_"
             f"{recurrence_label}\n"
-            f"📋 *Google Task:* {task_status_text}\n\n"
-            f"🔔 _I will automatically ping you when this block ends!_"
+            f"📋 Task: {task_status}\n\n"
+            f"🔔 _I'll ping you when this block ends._"
         )
+
+        # Post-schedule action buttons
+        post_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Mark Done", callback_data=f"ev_done:{event_id}"),
+                InlineKeyboardButton("⏳ Extend", callback_data=f"ev_extend:{event_id}"),
+            ],
+            [
+                InlineKeyboardButton("🔄 Reschedule", callback_data=f"ev_resched_menu:{event_id}"),
+                InlineKeyboardButton("🗑️ Delete", callback_data=f"ev_del_ask:{event_id}"),
+            ],
+        ])
 
         await context.bot.send_message(
             chat_id=chat_id,
             text=success_text,
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=post_keyboard
         )
 
     except Exception as e:
@@ -367,14 +435,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Unauthorized access.")
         return
 
-    # Check if user has an active pending dialog (e.g. custom extension minutes)
+    # Active pending dialog check
     pending = await db_instance.get_pending_dialog(user.id)
     if pending:
         action = pending.get("action")
         payload = pending.get("payload", {})
 
         if action == "await_custom_extension":
-            # Expecting a number of minutes
             clean_digits = "".join([c for c in user_text if c.isdigit()])
             if clean_digits:
                 mins = int(clean_digits)
@@ -384,14 +451,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             else:
                 await update.message.reply_text(
-                    "⚠️ Please reply with a valid number of minutes (e.g. `15`, `30`, `45`) or /cancel."
+                    "⚠️ Reply with a number of minutes (e.g. `30`) or /cancel.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")
+                    ]])
                 )
                 return
 
-    # Send typing indicator
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        if action == "await_reschedule_time":
+            # User typed a new time for an existing event
+            event_id = payload.get("event_id")
+            await db_instance.clear_pending_dialog(user.id)
+            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            # Feed back to LLM to parse the new time in context of the event
+            llm_result = await llm_service_instance.parse_user_request(
+                f"Reschedule to: {user_text}"
+            )
+            args = llm_result.get("arguments", {}) or {}
+            if llm_result.get("tool_name") in ("reschedule_session", "schedule_session"):
+                new_start = args.get("new_start_iso") or args.get("start_iso")
+                new_end = args.get("new_end_iso") or args.get("end_iso")
+                if new_start and new_end:
+                    await execute_reschedule_to(chat_id, event_id, new_start, new_end, context)
+                    return
+            await update.message.reply_text(
+                "🤔 Couldn't parse that time. Try: _\"tomorrow at 3 PM\"_ or _\"Friday at 10 AM\"_.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
 
-    # Call LLM via OpenRouter
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     llm_result = await llm_service_instance.parse_user_request(user_text)
 
     tool_name = llm_result.get("tool_name") if llm_result.get("is_tool_call") else None
@@ -403,15 +492,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         start_iso = args.get("start_iso")
         end_iso = args.get("end_iso")
         target_cal = args.get("target_calendar_name")
-        recurrence = args.get("recurrence")  # may be None for one-off
+        recurrence = args.get("recurrence")
 
         if not start_iso or not end_iso:
-            await update.message.reply_text(
-                "🤔 I couldn't determine the exact start and end times. Could you specify the time or duration?"
-            )
+            # Time unclear — show quick time picker
+            await _send_time_picker(update, user, title, recurrence)
             return
 
-        # If LLM is uncertain or calendar not found, ask user via inline keyboard
         if target_cal == "uncertain" or not Config.get_calendar_id(target_cal):
             pending_payload = {
                 "title": title,
@@ -420,33 +507,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "recurrence": recurrence
             }
             await db_instance.set_pending_dialog(user.id, "select_calendar", pending_payload)
-
-            keyboard = []
-            row = []
-            for cal_name in ACTIVE_CALENDARS:
-                row.append(InlineKeyboardButton(cal_name, callback_data=f"pick_cal:{cal_name}"))
-                if len(row) == 2:
-                    keyboard.append(row)
-                    row = []
-            if row:
-                keyboard.append(row)
-
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            start_fmt = format_human_datetime(start_iso)
-            end_fmt = format_human_datetime(end_iso).split(" at ")[-1]
-            recurrence_hint = f"\n🔁 Recurring: `{recurrence}`" if recurrence else ""
-
-            msg = (
-                f"🤔 *Which calendar should this be scheduled in?*\n\n"
-                f"📌 *Activity:* `{title}`\n"
-                f"🕒 *Time:* {start_fmt} – {end_fmt}"
-                f"{recurrence_hint}\n\n"
-                f"Please choose below:"
-            )
-            await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+            await _send_calendar_picker(update, title, start_iso, end_iso, recurrence)
             return
 
-        # Category is known: execute schedule
         await schedule_and_reply(chat_id, user.id, title, start_iso, end_iso, target_cal, context,
                                  recurrence=recurrence)
 
@@ -462,45 +525,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not matches:
             await update.message.reply_text(
-                "\u274c No active scheduled event found matching "
-                f"*\"{args.get('search_title')}\"*.\n\n"
-                "Use /delete to see all your upcoming events.",
-                parse_mode=ParseMode.MARKDOWN
+                f"❌ No event found matching *\"{args.get('search_title')}\"*.\n"
+                "Use /delete to see all scheduled events.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📋 Show All Events", callback_data="menu:delete")
+                ]])
             )
             return
 
-        if len(matches) == 1:
-            ev = matches[0]
-            short_title = ev["title"].replace("⏳ ", "").replace("⏳", "").strip()
-            start_fmt = format_human_datetime(ev["start_iso"])
-            keyboard = [[
-                InlineKeyboardButton("🗑️ Yes, Delete It", callback_data=f"delete_confirm:{ev['event_id']}"),
+        ev = matches[0]
+        short_title = ev["title"].replace("⏳ ", "").replace("⏳", "").strip()
+        start_fmt = format_human_datetime(ev["start_iso"])
+        await update.message.reply_text(
+            f"⚠️ *Confirm Deletion*\n\n"
+            f"📌 *{short_title}*\n🕒 {start_fmt}\n\n"
+            f"This permanently removes it from Google Calendar.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🗑️ Yes, Delete", callback_data=f"delete_confirm:{ev['event_id']}"),
                 InlineKeyboardButton("❌ Cancel", callback_data="delete_cancel")
-            ]]
-            await update.message.reply_text(
-                f"⚠️ *Confirm Deletion*\n\n"
-                f"📌 *{short_title}*\n"
-                f"🕒 {start_fmt}\n\n"
-                f"This will permanently remove the event from Google Calendar.",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode=ParseMode.MARKDOWN
-            )
-        else:
-            # Multiple matches — let user pick
-            keyboard = []
-            for ev in matches[:5]:
-                short_title = ev["title"].replace("⏳ ", "").replace("⏳", "").strip()
-                start_fmt = format_human_datetime(ev["start_iso"])
-                keyboard.append([InlineKeyboardButton(
-                    f"🗑️ {short_title[:25]} — {start_fmt}",
-                    callback_data=f"delete_ask:{ev['event_id']}"
-                )])
-            keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="delete_cancel")])
-            await update.message.reply_text(
-                f"🔍 Found {len(matches)} events matching *\"{args.get('search_title')}\"*. Which one?",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode=ParseMode.MARKDOWN
-            )
+            ]]),
+            parse_mode=ParseMode.MARKDOWN
+        )
 
     # ── reschedule_session ────────────────────────────────────────────
     elif tool_name == "reschedule_session":
@@ -510,7 +556,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not new_start_iso or not new_end_iso:
             await update.message.reply_text(
-                "🤔 I couldn't determine the new time. Please specify the new date and time."
+                "🤔 I couldn't determine the new time. Please specify it, e.g. _\"tomorrow at 3 PM\"_.",
+                parse_mode=ParseMode.MARKDOWN
             )
             return
 
@@ -522,22 +569,104 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
 
         if not matches:
-            search_query = args.get('search_title', '')
+            search_query = args.get("search_title", "")
             await update.message.reply_text(
-                f"❌ No active event found matching *\"{search_query}\"*.\n\n"
+                f"❌ No event found matching *\"{search_query}\"*.\n"
                 "Use /status to view your upcoming events.",
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📋 My Events", callback_data="menu:events")
+                ]])
             )
             return
 
-        ev = matches[0]  # Take closest match
+        ev = matches[0]
         await update.message.reply_text("🔄 Rescheduling...")
         await execute_reschedule_to(chat_id, ev["event_id"], new_start_iso, new_end_iso, context)
 
     # ── conversational fallback ───────────────────────────────────────
     else:
-        reply = llm_result.get("reply_text") or "I received your message."
-        await update.message.reply_text(reply)
+        reply = llm_result.get("reply_text") or "How can I help? Use the menu below."
+        await update.message.reply_text(
+            reply,
+            reply_markup=main_menu_keyboard()
+        )
+
+
+# =====================================================================
+# TIME + CALENDAR PICKERS
+# =====================================================================
+
+async def _send_time_picker(update: Update, user, title: str, recurrence: str | None):
+    """Shows a quick time selection grid when time is not specified."""
+    tz = Config.USER_TIMEZONE
+    now = datetime.now(tz)
+
+    # Build suggested time slots
+    slots = []
+    for label, delta_h, hour in [
+        ("Today 9 AM", 0, 9),
+        ("Today 12 PM", 0, 12),
+        ("Today 3 PM", 0, 15),
+        ("Today 6 PM", 0, 18),
+        ("Today 8 PM", 0, 20),
+        ("Tomorrow 9 AM", 1, 9),
+        ("Tomorrow 12 PM", 1, 12),
+        ("Tomorrow 3 PM", 1, 15),
+    ]:
+        slot_dt = (now + timedelta(days=delta_h)).replace(hour=hour, minute=0, second=0, microsecond=0)
+        if slot_dt > now + timedelta(minutes=15):
+            slots.append((label, slot_dt.isoformat()))
+
+    slots = slots[:6]  # Max 6 suggestions
+
+    # Save pending
+    await db_instance.set_pending_dialog(user.id, "select_calendar", {
+        "title": title, "recurrence": recurrence,
+        "awaiting_time": True
+    })
+
+    keyboard = []
+    row = []
+    for label, iso in slots:
+        row.append(InlineKeyboardButton(label, callback_data=f"quicktime:{iso}:{title[:20]}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_proposal")])
+
+    await update.message.reply_text(
+        f"🕒 *When should I schedule:*\n`{title}`?\n\nPick a slot or just type the time:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+async def _send_calendar_picker(update, title: str, start_iso: str, end_iso: str, recurrence: str | None):
+    """Shows calendar selection buttons when category is uncertain."""
+    keyboard = []
+    row = []
+    for cal_name in ACTIVE_CALENDARS:
+        row.append(InlineKeyboardButton(cal_name, callback_data=f"pick_cal:{cal_name}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    start_fmt = format_human_datetime(start_iso)
+    end_fmt = format_human_datetime(end_iso).split(" at ")[-1]
+    recurrence_hint = f"\n🔁 `{recurrence}`" if recurrence else ""
+
+    msg = (
+        f"📁 *Which calendar for:*\n`{title}`?\n\n"
+        f"🕒 {start_fmt} – {end_fmt}{recurrence_hint}\n\n"
+        f"Pick below:"
+    )
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+
 
 # =====================================================================
 # EXTENSION & RESCHEDULE EXECUTORS
@@ -547,7 +676,7 @@ async def execute_extension(chat_id: int, event_id: str, minutes: int, context: 
     """Extends calendar event and linked task by X minutes."""
     event = await db_instance.get_tracked_event(event_id)
     if not event:
-        await context.bot.send_message(chat_id=chat_id, text="⚠️ Event not found in local database.")
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ Event not found in database.")
         return
 
     old_end = datetime.fromisoformat(event["end_iso"])
@@ -555,7 +684,6 @@ async def execute_extension(chat_id: int, event_id: str, minutes: int, context: 
     new_end_iso = new_end.isoformat()
 
     try:
-        # Patch Calendar
         google_service_instance.patch_calendar_event_times(
             calendar_id=event["calendar_id"],
             event_id=event_id,
@@ -563,13 +691,11 @@ async def execute_extension(chat_id: int, event_id: str, minutes: int, context: 
             end_iso=new_end_iso
         )
 
-        # Shift Linked Task
         task_id = event.get("task_id")
         if task_id:
             new_task_due = (new_end + timedelta(minutes=5)).isoformat()
             google_service_instance.update_google_task_due(task_id, new_task_due)
 
-        # Update DB and set status back to active
         await db_instance.update_event_times(event_id, event["start_iso"], new_end_iso, status="active")
 
         new_end_fmt = format_human_datetime(new_end_iso)
@@ -577,16 +703,17 @@ async def execute_extension(chat_id: int, event_id: str, minutes: int, context: 
             chat_id=chat_id,
             text=(
                 f"⏳ *Extended by {minutes} minutes!*\n\n"
-                f"📌 *Block:* `{event['title']}`\n"
-                f"🕒 *New End Time:* {new_end_fmt}\n"
-                f"📋 Linked Task due time shifted accordingly.\n\n"
-                f"_I will check in again when the extension concludes!_"
+                f"📌 `{event['title']}`\n"
+                f"🕒 New end: {new_end_fmt}\n\n"
+                f"_I'll check in again when the extension concludes!_"
             ),
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=event_action_keyboard(event_id)
         )
     except Exception as e:
         logger.error(f"Failed to extend event: {e}", exc_info=True)
-        await context.bot.send_message(chat_id=chat_id, text=f"❌ Failed to extend event: {e}")
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ Failed to extend: {e}")
+
 
 async def execute_reschedule_to(
     chat_id: int,
@@ -598,7 +725,7 @@ async def execute_reschedule_to(
     """Reschedules an existing event to an explicit new start/end time."""
     event = await db_instance.get_tracked_event(event_id)
     if not event:
-        await context.bot.send_message(chat_id=chat_id, text="⚠️ Event not found in local database.")
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ Event not found in database.")
         return
 
     try:
@@ -618,19 +745,21 @@ async def execute_reschedule_to(
 
         new_start_fmt = format_human_datetime(new_start_iso)
         new_end_fmt = format_human_datetime(new_end_iso).split(" at ")[-1]
+        dur = format_duration(new_start_iso, new_end_iso)
 
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
                 f"🔄 *Rescheduled!*\n\n"
-                f"📌 *Block:* `{event['title']}`\n"
-                f"🕒 *New Time:* {new_start_fmt} – {new_end_fmt}\n"
-                f"📋 Google Task due date updated."
+                f"📌 `{event['title']}`\n"
+                f"🕒 {new_start_fmt} – {new_end_fmt}  _{dur}_\n"
+                f"📋 Task due updated."
             ),
-            parse_mode="Markdown"
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=event_action_keyboard(event_id)
         )
     except Exception as e:
-        logger.error(f"Failed to reschedule event to specific time: {e}", exc_info=True)
+        logger.error(f"Failed to reschedule: {e}", exc_info=True)
         await context.bot.send_message(chat_id=chat_id, text=f"❌ Failed to reschedule: {e}")
 
 
@@ -638,10 +767,9 @@ async def execute_reschedule(chat_id: int, event_id: str, context: ContextTypes.
     """Finds next available gap and reschedules event and task."""
     event = await db_instance.get_tracked_event(event_id)
     if not event:
-        await context.bot.send_message(chat_id=chat_id, text="⚠️ Event not found in local database.")
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ Event not found in database.")
         return
 
-    # Calculate duration
     start_dt = datetime.fromisoformat(event["start_iso"])
     end_dt = datetime.fromisoformat(event["end_iso"])
     duration_mins = max(15, int((end_dt - start_dt).total_seconds() / 60))
@@ -656,45 +784,15 @@ async def execute_reschedule(chat_id: int, event_id: str, context: ContextTypes.
             duration_minutes=duration_mins,
             calendar_ids=active_cal_ids
         )
-
-        # Patch Calendar
-        google_service_instance.patch_calendar_event_times(
-            calendar_id=event["calendar_id"],
-            event_id=event_id,
-            start_iso=new_start_iso,
-            end_iso=new_end_iso
-        )
-
-        # Patch Task
-        task_id = event.get("task_id")
-        if task_id:
-            new_task_due = (datetime.fromisoformat(new_end_iso) + timedelta(minutes=5)).isoformat()
-            google_service_instance.update_google_task_due(task_id, new_task_due)
-
-        # Update DB
-        await db_instance.update_event_times(event_id, new_start_iso, new_end_iso, status="active")
-
-        new_start_fmt = format_human_datetime(new_start_iso)
-        new_end_fmt = format_human_datetime(new_end_iso).split(" at ")[-1]
-
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                f"🔄 *Session Rescheduled!*\n\n"
-                f"📌 *Block:* `{event['title']}`\n"
-                f"🕒 *New Timeslot:* {new_start_fmt} – {new_end_fmt}\n"
-                f"📋 Google Task due date updated.\n\n"
-                f"_Accountability monitor will ping you during the new timeslot._"
-            ),
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await execute_reschedule_to(chat_id, event_id, new_start_iso, new_end_iso, context)
 
     except Exception as e:
         logger.error(f"Failed to reschedule: {e}", exc_info=True)
-        await context.bot.send_message(chat_id=chat_id, text=f"❌ Failed to reschedule event: {e}")
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ Failed to find free slot: {e}")
+
 
 # =====================================================================
-# CALLBACK QUERY HANDLERS
+# CALLBACK QUERY HANDLER
 # =====================================================================
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -708,40 +806,170 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("⛔ Unauthorized.")
         return
 
-    # Calendar Picker callback
+    # ── Main Menu shortcuts ───────────────────────────────────────────
+    if data == "menu:schedule":
+        await query.edit_message_text(
+            "💬 *Just tell me what to schedule!*\n\n"
+            "Examples:\n"
+            '• _"Study algorithms tomorrow at 2 PM for 2 hours"_\n'
+            '• _"Daily gym at 7 AM for 45 minutes"_\n'
+            '• _"Grading session Thursday 3–5 PM"_',
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    if data == "menu:events":
+        upcoming = await db_instance.get_upcoming_events(chat_id, limit=8)
+        if not upcoming:
+            await query.edit_message_text(
+                "📭 No upcoming sessions scheduled.",
+                reply_markup=main_menu_keyboard()
+            )
+            return
+        lines = ["📅 *Upcoming Sessions:*\n"]
+        keyboard = []
+        for i, ev in enumerate(upcoming, 1):
+            title_clean = ev["title"].replace("⏳ ", "").replace("⏳", "").strip()
+            start_fmt = format_human_datetime(ev["start_iso"])
+            end_time = format_human_datetime(ev["end_iso"]).split(" at ")[-1]
+            dur = format_duration(ev["start_iso"], ev["end_iso"])
+            lines.append(f"*{i}.* ⏳ {title_clean}\n   🕒 {start_fmt} – {end_time}  _{dur}_")
+            keyboard.append([
+                InlineKeyboardButton(f"{i}:✅", callback_data=f"ev_done:{ev['event_id']}"),
+                InlineKeyboardButton(f"{i}:⏳+", callback_data=f"ev_extend:{ev['event_id']}"),
+                InlineKeyboardButton(f"{i}:🔄", callback_data=f"ev_resched_menu:{ev['event_id']}"),
+                InlineKeyboardButton(f"{i}:🗑️", callback_data=f"ev_del_ask:{ev['event_id']}"),
+            ])
+        lines.append("\n_✅ Done · ⏳ Extend · 🔄 Reschedule · 🗑️ Delete_")
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    if data == "menu:delete":
+        upcoming = await db_instance.get_upcoming_events(chat_id, limit=10)
+        if not upcoming:
+            await query.edit_message_text("📭 No active events to delete.", reply_markup=main_menu_keyboard())
+            return
+        lines = ["🗑️ *Select an event to delete:*\n"]
+        keyboard = []
+        for i, ev in enumerate(upcoming, 1):
+            short_title = ev["title"].replace("⏳ ", "").replace("⏳", "").strip()
+            start_fmt = format_human_datetime(ev["start_iso"])
+            lines.append(f"*{i}.* {short_title} — {start_fmt}")
+            keyboard.append([InlineKeyboardButton(
+                f"🗑️ {i}. {short_title[:28]}",
+                callback_data=f"ev_del_ask:{ev['event_id']}"
+            )])
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="delete_cancel")])
+        await query.edit_message_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    if data == "menu:help":
+        await query.edit_message_text(
+            "⏳ *Kairos — Quick Reference:*\n\n"
+            "🗣️ *Just talk naturally:*\n"
+            '• _"Study linear algebra for 2h tomorrow at 10 AM"_\n'
+            '• _"Delete my database session"_\n'
+            '• _"Reschedule grading to Friday 3 PM"_\n'
+            '• _"Schedule a daily gym at 7 AM for 45 mins"_\n\n'
+            "📋 Commands: /status · /delete · /cancel · /help\n\n"
+            "🔁 Recurrence: daily · weekly · weekdays · weekends · mon–sun",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=main_menu_keyboard()
+        )
+        return
+
+    if data == "cancel_action":
+        await db_instance.clear_pending_dialog(user.id)
+        await query.edit_message_text("✅ Action cancelled.", reply_markup=main_menu_keyboard())
+        return
+
+    # ── Quick time slot selection (from time picker) ──────────────────
+    if data.startswith("quicktime:"):
+        # format: quicktime:{iso}:{title}
+        parts = data.split(":", 2)
+        if len(parts) < 3:
+            await query.edit_message_text("⚠️ Invalid quick-time data.")
+            return
+        _, iso_start, short_title = parts
+        pending = await db_instance.get_pending_dialog(user.id)
+        if not pending:
+            await query.edit_message_text("⚠️ Session expired. Please try again.")
+            return
+        payload = pending.get("payload", {})
+        title = payload.get("title", short_title)
+        recurrence = payload.get("recurrence")
+        # Default 1-hour duration
+        dt_start = datetime.fromisoformat(iso_start)
+        dt_end = dt_start + timedelta(hours=1)
+        # Show calendar picker next
+        pending_payload = {
+            "title": title,
+            "start_iso": iso_start,
+            "end_iso": dt_end.isoformat(),
+            "recurrence": recurrence
+        }
+        await db_instance.set_pending_dialog(user.id, "select_calendar", pending_payload)
+        start_fmt = format_human_datetime(iso_start)
+
+        keyboard = []
+        row = []
+        for cal_name in ACTIVE_CALENDARS:
+            row.append(InlineKeyboardButton(cal_name, callback_data=f"pick_cal:{cal_name}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+        await query.edit_message_text(
+            f"🕒 *{start_fmt}* (1 hour)\n📌 `{title}`\n\n📁 *Which calendar?*",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    # ── Calendar picker callback ──────────────────────────────────────
     if data.startswith("pick_cal:"):
         selected_cal = data.split("pick_cal:")[-1]
         pending = await db_instance.get_pending_dialog(user.id)
         if not pending or pending.get("action") != "select_calendar":
-            await query.edit_message_text("⚠️ Selection expired. Please request scheduling again.")
+            await query.edit_message_text("⚠️ Selection expired. Please try again.")
             return
 
         payload = pending.get("payload", {})
         title = payload.get("title")
         start_iso = payload.get("start_iso")
         end_iso = payload.get("end_iso")
+        recurrence = payload.get("recurrence")
 
         await db_instance.clear_pending_dialog(user.id)
-        await query.edit_message_text(f"Selected calendar: *{selected_cal}*. Checking availability...", parse_mode=ParseMode.MARKDOWN)
-
+        await query.edit_message_text(
+            f"📁 *{selected_cal}* selected. Checking availability…",
+            parse_mode=ParseMode.MARKDOWN
+        )
         await schedule_and_reply(chat_id, user.id, title, start_iso, end_iso, selected_cal, context,
-                               recurrence=payload.get("recurrence"))
+                                 recurrence=recurrence)
         return
 
-    # Accept Proposed Slot callback
+    # ── Accept conflict proposal ──────────────────────────────────────
     if data == "accept_proposal":
         pending = await db_instance.get_pending_dialog(user.id)
         if not pending or pending.get("action") != "propose_slot":
             await query.edit_message_text("⚠️ Proposed slot expired.")
             return
-
         payload = pending.get("payload", {})
         await db_instance.clear_pending_dialog(user.id)
-        await query.edit_message_text("Booking proposed slot...")
-
+        await query.edit_message_text("📅 Booking proposed slot…")
         await schedule_and_reply(
-            chat_id=chat_id,
-            user_id=user.id,
+            chat_id=chat_id, user_id=user.id,
             title=payload["title"],
             start_iso=payload["start_iso"],
             end_iso=payload["end_iso"],
@@ -753,33 +981,213 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     if data == "cancel_proposal":
         await db_instance.clear_pending_dialog(user.id)
-        await query.edit_message_text("❌ Scheduling request cancelled.")
+        await query.edit_message_text("❌ Scheduling cancelled.", reply_markup=main_menu_keyboard())
         return
 
-    # Delete: first confirmation prompt (from /delete list)
-    if data.startswith("delete_ask:"):
-        event_id = data.split("delete_ask:")[-1]
+    # ── Per-event: Mark Done ──────────────────────────────────────────
+    if data.startswith("ev_done:") or data.startswith("status_done:"):
+        event_id = data.split(":", 1)[-1]
+        event = await db_instance.get_tracked_event(event_id)
+        if not event:
+            await query.edit_message_text("⚠️ Event record not found.")
+            return
+
+        completed_cal_id = Config.get_calendar_id("Completed Tasks")
+        if not completed_cal_id:
+            await query.edit_message_text("⚠️ 'Completed Tasks' calendar not configured.")
+            return
+
+        try:
+            google_service_instance.move_calendar_event(
+                source_cal_id=event["calendar_id"],
+                dest_cal_id=completed_cal_id,
+                event_id=event_id
+            )
+            old_title = event["title"]
+            new_title = old_title.replace("⏳", "✅").strip()
+            if not new_title.startswith("✅"):
+                new_title = f"✅ {new_title}"
+            google_service_instance.patch_calendar_event_title(
+                calendar_id=completed_cal_id,
+                event_id=event_id,
+                new_title=new_title
+            )
+            task_id = event.get("task_id")
+            if task_id:
+                google_service_instance.complete_google_task(task_id)
+            await db_instance.update_event_calendar(
+                event_id=event_id, new_calendar_id=completed_cal_id,
+                new_calendar_name="Completed Tasks", new_title=new_title, status="completed"
+            )
+            await query.edit_message_text(
+                f"🎉 *Well done!*\n\n"
+                f"📌 `{new_title}`\n"
+                f"📁 Moved to Completed Tasks\n"
+                f"📋 Google Task ✅",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=main_menu_keyboard()
+            )
+        except Exception as e:
+            logger.error(f"Error marking done: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Error: {e}")
+        return
+
+    # ── Per-event: Extend ─────────────────────────────────────────────
+    if data.startswith("ev_extend:") or data.startswith("status_extend:"):
+        event_id = data.split(":", 1)[-1]
+        keyboard = [
+            [
+                InlineKeyboardButton("+15 min", callback_data=f"ext_quick:{event_id}:15"),
+                InlineKeyboardButton("+30 min", callback_data=f"ext_quick:{event_id}:30"),
+                InlineKeyboardButton("+45 min", callback_data=f"ext_quick:{event_id}:45"),
+            ],
+            [
+                InlineKeyboardButton("+60 min", callback_data=f"ext_quick:{event_id}:60"),
+                InlineKeyboardButton("+90 min", callback_data=f"ext_quick:{event_id}:90"),
+                InlineKeyboardButton("⌨️ Custom", callback_data=f"ext_custom:{event_id}"),
+            ]
+        ]
+        await query.edit_message_text(
+            "⏳ *Extend block by how many minutes?*",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    # Quick Extension callback
+    if data.startswith("ext_quick:"):
+        parts = data.split(":")
+        event_id, mins_str = parts[1], parts[2]
+        mins = int(mins_str)
+        await query.edit_message_text(f"Extending by {mins} minutes…")
+        await execute_extension(chat_id, event_id, mins, context)
+        return
+
+    # Custom Extension callback
+    if data.startswith("ext_custom:"):
+        event_id = data.split("ext_custom:")[-1]
+        await db_instance.set_pending_dialog(user.id, "await_custom_extension", {"event_id": event_id})
+        await query.edit_message_text(
+            "⌨️ *Custom Extension:*\n\nReply with the number of minutes (e.g. `20` or `45`).",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")
+            ]])
+        )
+        return
+
+    # ── Per-event: Reschedule menu ────────────────────────────────────
+    if data.startswith("ev_resched_menu:") or data.startswith("status_resched:"):
+        event_id = data.split(":", 1)[-1]
+        event = await db_instance.get_tracked_event(event_id)
+        if not event:
+            await query.edit_message_text("⚠️ Event not found.")
+            return
+
+        title_clean = event["title"].replace("⏳ ", "").replace("⏳", "").strip()
+
+        # Compute quick relative options
+        tz = Config.USER_TIMEZONE
+        now = datetime.now(tz)
+        quick_slots = []
+        for label, delta_h, hour in [
+            ("Today 3 PM", 0, 15),
+            ("Today 6 PM", 0, 18),
+            ("Today 8 PM", 0, 20),
+            ("Tomorrow 9 AM", 1, 9),
+            ("Tomorrow 2 PM", 1, 14),
+            ("Tomorrow 6 PM", 1, 18),
+        ]:
+            slot_dt = (now + timedelta(days=delta_h)).replace(hour=hour, minute=0, second=0, microsecond=0)
+            if slot_dt > now + timedelta(minutes=15):
+                quick_slots.append((label, slot_dt.isoformat()))
+
+        # Duration of original event
+        orig_dur = max(30, int(
+            (datetime.fromisoformat(event["end_iso"]) - datetime.fromisoformat(event["start_iso"])).total_seconds() / 60
+        ))
+
+        keyboard = []
+        row = []
+        for label, start_iso in quick_slots[:6]:
+            end_iso = (datetime.fromisoformat(start_iso) + timedelta(minutes=orig_dur)).isoformat()
+            row.append(InlineKeyboardButton(
+                label,
+                callback_data=f"resched_slot:{event_id}:{start_iso}:{end_iso}"
+            ))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append([
+            InlineKeyboardButton("⌨️ Type a time", callback_data=f"resched_custom:{event_id}"),
+            InlineKeyboardButton("🔄 Next Free Slot", callback_data=f"resched_auto:{event_id}"),
+        ])
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
+
+        await query.edit_message_text(
+            f"🔄 *Reschedule:* `{title_clean}`\n\nPick a new time:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    # Quick reschedule slot selected from menu
+    if data.startswith("resched_slot:"):
+        # format: resched_slot:{event_id}:{start_iso}:{end_iso}
+        parts = data.split(":", 3)
+        if len(parts) < 4:
+            await query.edit_message_text("⚠️ Invalid reschedule data.")
+            return
+        _, event_id, new_start_iso, new_end_iso = parts
+        await query.edit_message_text("🔄 Rescheduling…")
+        await execute_reschedule_to(chat_id, event_id, new_start_iso, new_end_iso, context)
+        return
+
+    # Auto-reschedule: find next free slot
+    if data.startswith("resched_auto:"):
+        event_id = data.split("resched_auto:")[-1]
+        await query.edit_message_text("🔍 Finding next available slot…")
+        await execute_reschedule(chat_id, event_id, context)
+        return
+
+    # Custom reschedule: ask user to type new time
+    if data.startswith("resched_custom:"):
+        event_id = data.split("resched_custom:")[-1]
+        await db_instance.set_pending_dialog(user.id, "await_reschedule_time", {"event_id": event_id})
+        await query.edit_message_text(
+            "⌨️ *Type the new date and time:*\n\n"
+            "Examples:\n• _tomorrow at 3 PM_\n• _Friday at 10 AM_\n• _next Monday 2 PM_",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")
+            ]])
+        )
+        return
+
+    # ── Per-event: Delete (confirm prompt) ───────────────────────────
+    if data.startswith("ev_del_ask:") or data.startswith("delete_ask:"):
+        event_id = data.split(":", 1)[-1]
         event = await db_instance.get_tracked_event(event_id)
         if not event:
             await query.edit_message_text("⚠️ Event not found.")
             return
         short_title = event["title"].replace("⏳ ", "").replace("⏳", "").strip()
         start_fmt = format_human_datetime(event["start_iso"])
-        keyboard = [[
-            InlineKeyboardButton("🗑️ Yes, Delete It", callback_data=f"delete_confirm:{event_id}"),
-            InlineKeyboardButton("❌ Cancel", callback_data="delete_cancel")
-        ]]
         await query.edit_message_text(
             f"⚠️ *Confirm Deletion*\n\n"
-            f"📌 *{short_title}*\n"
-            f"🕒 {start_fmt}\n\n"
-            f"This will permanently remove the event from Google Calendar.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            f"📌 *{short_title}*\n🕒 {start_fmt}\n\n"
+            f"This permanently removes it from Google Calendar.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🗑️ Yes, Delete", callback_data=f"delete_confirm:{event_id}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="delete_cancel")
+            ]]),
             parse_mode=ParseMode.MARKDOWN
         )
         return
 
-    # Delete: confirmed — actually delete
+    # Confirmed delete
     if data.startswith("delete_confirm:"):
         event_id = data.split("delete_confirm:")[-1]
         event = await db_instance.get_tracked_event(event_id)
@@ -792,134 +1200,28 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 calendar_id=event["calendar_id"],
                 event_id=event_id
             )
-            # Delete linked task if present
             task_id = event.get("task_id")
             if task_id:
                 google_service_instance.delete_google_task(task_id)
-            # Mark deleted in DB
             await db_instance.update_event_status(event_id, "deleted")
             await query.edit_message_text(
-                f"🗑️ *Deleted!*\n\n"
-                f"📌 `{short_title}` has been permanently removed from Google Calendar.",
-                parse_mode=ParseMode.MARKDOWN
+                f"🗑️ *Deleted!*\n\n`{short_title}` removed from Google Calendar.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=main_menu_keyboard()
             )
         except Exception as e:
             logger.error(f"Failed to delete event {event_id}: {e}", exc_info=True)
-            await query.edit_message_text(f"❌ Failed to delete event: {e}")
+            await query.edit_message_text(f"❌ Failed to delete: {e}")
         return
 
-    # Delete: cancelled
     if data == "delete_cancel":
-        await query.edit_message_text("✅ Deletion cancelled.")
+        await query.edit_message_text("✅ Deletion cancelled.", reply_markup=main_menu_keyboard())
         return
 
-    # Block Status: Done
-    if data.startswith("status_done:"):
-        event_id = data.split("status_done:")[-1]
-        event = await db_instance.get_tracked_event(event_id)
-        if not event:
-            await query.edit_message_text("⚠️ Event record not found.")
-            return
+    # ── Accountability loop (scheduler.py sends these) ────────────────
+    # status_done / status_extend / status_resched are now aliased above via
+    # the ev_done / ev_extend / ev_resched_menu handlers — no duplicate code needed.
 
-        completed_cal_id = Config.get_calendar_id("Completed Tasks")
-        if not completed_cal_id:
-            await query.edit_message_text("⚠️ 'Completed Tasks' calendar is not configured.")
-            return
-
-        try:
-            # Move event to Completed Tasks calendar
-            google_service_instance.move_calendar_event(
-                source_cal_id=event["calendar_id"],
-                dest_cal_id=completed_cal_id,
-                event_id=event_id
-            )
-
-            # Patch summary: replace ⏳ with ✅
-            old_title = event["title"]
-            new_title = old_title.replace("⏳", "✅").strip()
-            if not new_title.startswith("✅"):
-                new_title = f"✅ {new_title}"
-
-            google_service_instance.patch_calendar_event_title(
-                calendar_id=completed_cal_id,
-                event_id=event_id,
-                new_title=new_title
-            )
-
-            # Complete Linked Task
-            task_id = event.get("task_id")
-            if task_id:
-                google_service_instance.complete_google_task(task_id)
-
-            # Update DB
-            await db_instance.update_event_calendar(
-                event_id=event_id,
-                new_calendar_id=completed_cal_id,
-                new_calendar_name="Completed Tasks",
-                new_title=new_title,
-                status="completed"
-            )
-
-            await query.edit_message_text(
-                f"🎉 *Fantastic work!*\n\n"
-                f"📌 *Block:* `{new_title}`\n"
-                f"📁 *Moved to:* `Completed Tasks`\n"
-                f"📋 *Google Task:* Marked as Completed ✅",
-                parse_mode=ParseMode.MARKDOWN
-            )
-        except Exception as e:
-            logger.error(f"Error marking event done: {e}", exc_info=True)
-            await query.edit_message_text(f"❌ Error updating completed block: {e}")
-        return
-
-    # Block Status: Working on it (Extension prompt)
-    if data.startswith("status_extend:"):
-        event_id = data.split("status_extend:")[-1]
-        keyboard = [
-            [
-                InlineKeyboardButton("+15 min", callback_data=f"ext_quick:{event_id}:15"),
-                InlineKeyboardButton("+30 min", callback_data=f"ext_quick:{event_id}:30")
-            ],
-            [
-                InlineKeyboardButton("+45 min", callback_data=f"ext_quick:{event_id}:45"),
-                InlineKeyboardButton("+60 min", callback_data=f"ext_quick:{event_id}:60")
-            ],
-            [
-                InlineKeyboardButton("⌨️ Custom Minutes", callback_data=f"ext_custom:{event_id}")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
-            "⏳ *Still working on it!*\n\nHow many minutes would you like to extend this block by?",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-
-    # Quick Extension Callback
-    if data.startswith("ext_quick:"):
-        _, event_id, mins_str = data.split(":")
-        mins = int(mins_str)
-        await query.edit_message_text(f"Extending block by {mins} minutes...")
-        await execute_extension(chat_id, event_id, mins, context)
-        return
-
-    # Custom Extension Callback
-    if data.startswith("ext_custom:"):
-        event_id = data.split("ext_custom:")[-1]
-        await db_instance.set_pending_dialog(user.id, "await_custom_extension", {"event_id": event_id})
-        await query.edit_message_text(
-            "⌨️ *Custom Extension:*\n\nPlease reply with the number of minutes (e.g. `20` or `45`).\nType /cancel to abort.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-
-    # Block Status: Reschedule
-    if data.startswith("status_resched:"):
-        event_id = data.split("status_resched:")[-1]
-        await query.edit_message_text("🔍 Searching for next available slot...")
-        await execute_reschedule(chat_id, event_id, context)
-        return
 
 def register_handlers(application):
     """Registers command, message, and callback handlers to the Telegram application."""
